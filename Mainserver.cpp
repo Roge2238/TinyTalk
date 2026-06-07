@@ -115,17 +115,38 @@ void recv_msg_loop(int sockfd, ClientInfo* client) {
         if (recv_all(sockfd, head, 5) < 0) break;
         
         int type = head[0];
-        if (type != 2) {
-            // 忽略非类型2的消息
-            continue;
-        }
 
         int len = (head[1] << 24) | (head[2] << 16) | (head[3] << 8) | head[4];
         if (len <= 0 || len >= sizeof(buf)) break;
         if (recv_all(sockfd, buf, len) < 0) break;
         
         buf[len] = '\0';
-        
+        if( type == 3) // 查询在线用户列表功能 ~
+        {
+            printf("%s\n", buf);
+            lock_guard<mutex> lk(clients_mtx);
+            if(OnlineClients.empty())
+            {
+                strncpy(msg, "没有人在线喵~ 空悲切 ", sizeof(msg) - 1);
+                msg[sizeof(msg) - 1] = '\0';
+            }else
+            {
+                char tmp[128] = "在线用户有 :";
+                int pos = strlen(tmp);
+                const int size = sizeof(tmp);
+             for( const auto& it : OnlineClients )
+             {
+                const char* p = it.first.c_str();
+                int ret = snprintf( tmp + pos, size, " %s", p);
+                pos+= ret;
+                if(pos > size) break;
+             }
+             strncpy(msg, tmp, sizeof(msg));
+             msg[sizeof(msg) - 1] = '\0';
+            }
+            send_pkg(sockfd, 3, msg, strlen(msg));
+            continue;
+        }
         // 解析消息格式：目标ID?消息内容
         char* c = buf;
         while (*c != '?' && *c != '\0') {

@@ -59,6 +59,15 @@ int send_pkg(int sockfd, char type, const char* str)
     return 0;
 }
 
+//查询在线用户列表
+void check_list(char* id ,int sockfd)
+{
+ char buf[100];
+ snprintf(buf, sizeof(buf), "%s查询在线用户列表", id);
+ send_pkg(sockfd, 3, buf);
+}
+
+
 int main(int argc, char* argv[])
 {
     int sockfd;
@@ -101,8 +110,8 @@ int main(int argc, char* argv[])
         close(sockfd);
         exit(1);
     }
-    printf("用户 %s 已上线\n", id);
-
+    // Change: 删去上线信息  加入查询说明书功能
+    printf("输入'o' 查看说明书\n");
     while (1) {
         printf("输入消息: ");
         fflush(stdout);
@@ -114,12 +123,24 @@ int main(int argc, char* argv[])
         }
 
         // 检查退出命令
-        if (strcmp(premsg, "quit") == 0 || strcmp(premsg, "exit") == 0) {
+        if (strcmp(premsg, "quit") == 0 || strcmp(premsg, "exit") == 0)
+        {
             printf("退出聊天\n");
             g_running = false;
             break;
         }
-         
+
+        if (strcmp(premsg, "o") == 0 )
+        {
+          printf("1)输入's' 查询在线列表\n2)输入'quit' or 'exit'退出\n3)输入 '@ + 用户id +消息' 发送消息 如'@0001 绷住'\n" );
+          continue;
+        } 
+        if( strcmp(premsg, "s") == 0)
+        {
+         check_list(id, sockfd);
+         continue;
+        }
+
         if(premsg[0] != '@') 
         {
             printf("格式错误: 要以@开头喵~\n");
