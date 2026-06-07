@@ -198,6 +198,7 @@ int recv_user_id(int sockfd, char* user, ClientInfo* client) {
 void recv_msg(int sockfd, ClientInfo* client) {
     char user[10] = {0};
     if (recv_user_id(sockfd, user, client) == 0) {
+        Inbox_send(client);
         recv_msg_loop(sockfd, client);
     }
     handle_client_disconnect(client);
