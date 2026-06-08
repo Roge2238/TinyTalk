@@ -69,12 +69,15 @@ int send_pkg(int sockfd, char type, const char* str, int len) {
 
 // 通知特定用户有新消息
 void notify_user(const string& user_id) {
+    ClientInfo* client = NULL;
+   {
     lock_guard<mutex> lk(clients_mtx);
     auto it = OnlineClients.find(user_id);
     if (it != OnlineClients.end()) {
-        ClientInfo* client = it->second;
-        Inbox_send(client);
+        client = it->second;
     }
+   }
+   if(client) Inbox_send(client);
 }
 
 // 处理客户端断开连接
