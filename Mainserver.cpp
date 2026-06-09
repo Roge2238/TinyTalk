@@ -19,7 +19,12 @@
 #include <unordered_map>
 #include <atomic>
 #include <chrono>
+#include <sys/epoll.h>
 using namespace std;
+
+#define MAX_EVENTS 1024
+#define LISTEN_PORT 4000
+#define BUF_LEN 1024
 
 void error_die(const char* msg) {
     perror(msg);
@@ -249,53 +254,87 @@ void task(int sockfd) {
 }
 
 // 服务器启动
-int startup(u_short* port) {
-    int httpd = socket(AF_INET, SOCK_STREAM, 0);
-    if (httpd == -1) {
-        error_die("socket");
-    }
+int startup(u_short port) {
     
+    //int epfd = epoll_create1(0);
+
+    int listen_fd = socket(AF_INET, SOCK_STREAM | sock_NONBLOCK, 0);
     struct sockaddr_in name;
     memset(&name, 0, sizeof(name));
     name.sin_family = AF_INET;
-    name.sin_port = htons(*port);
+    name.sin_port = htons(port);
     name.sin_addr.s_addr = htonl(INADDR_ANY);
     
     int on = 1;
-    if (setsockopt(httpd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
-        error_die("setsockopt failed");
+    if(setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
+    {
+        error_die();
     }
     
-    if (bind(httpd, (struct sockaddr*)&name, sizeof(name)) < 0) {
+    if (bind(listen_fd, (struct sockaddr*)&name, sizeof(name)) < 0) {
         error_die("bind");
     }
     
     if (*port == 0) {
         socklen_t namelen = sizeof(name);
-        if (getsockname(httpd, (struct sockaddr*)&name, &namelen) == -1) {
-            error_die("getsockname");
+        if (getsockname(listen_fd, (struct sockaddr*)&name, &namelen) < 0)
+        {
+            error_die();
         }
-        *port = ntohs(name.sin_port);
+        port = ntohs(name.sin_port);
     }
     
-    if (listen(httpd, 5) < 0) {
+    if (listen(listen_fd, 5) < 0) {
         error_die("listen");
     }
     
-    return httpd;
+    return listen_fd;
 }
 
 int main() {
-    int server_sock = -1;
+    /*int server_sock = -1;
     int client_sock = -1;
-    u_short port = 4000;
     struct sockaddr_in client_name;
     socklen_t client_name_len = sizeof(client_name);
     
     server_sock = startup(&port);
-    printf("Server running on port %d\n", port);
+    printf("Server running on port %d\n", port);*/
+     int epfd = epoll_create1(0);
+     int listen_fd = startup(LISTEN_PORT);
+     struct epoll_event ev;
+     ev.data.fd = listen_fd;
+     ev.events = EPOLLIN | EPOLLET;
+     epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
 
-    while (1) {
+     struct epoll_event events[MAX_EVENTS];
+     printf("epoll服务端启动,监听端口:%d\n", LISTEN_PORT);
+
+    while(1)
+    {
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+         if (nfds < 0)
+        {
+            perror("epoll_wait error");
+            break;
+        }
+
+        for(int i = 0; i < nfds; i++)
+        {
+            int cur_fd = events[i].data.fd;
+            uint32_t pre_event = events[i].events;
+
+            if(cur_fd == listen_fd && (pre_event & EPOLLIN))
+            {
+                struct sockaddr_in client_addr;
+                socklen_t addr_len = sizeof(client_addr);
+                while(1)
+                {
+                    int client_fd = accept4(listen_fd, (struct sockaddr*)&client_addr, &addr_len, SOCK_NONBLOCK);
+                }
+            }
+        }
+    }
+    /*while (1) {
         client_sock = accept(server_sock, (struct sockaddr*)&client_name, &client_name_len);
         if (client_sock == -1) {
             error_die("accept");
@@ -305,8 +344,9 @@ int main() {
         
         thread newthread(&task, client_sock);
         newthread.detach();
-    }
+    }*/
     
     close(server_sock);
     return 0;
 }
+//2026 6.9 学了epoll 开始大改！
