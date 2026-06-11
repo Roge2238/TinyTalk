@@ -22,59 +22,301 @@
 #include <sys/epoll.h>
 using namespace std;
 
-#define MAX_EVENTS 1024
-#define LISTEN_PORT 4000
-#define BUF_LEN 1024
+const int MAX_BUF = 1024;
+const int HEAD_LEN = 5;
+const int USER_ID_LEN = 10;
+const int MAX_EVENTS = 1024;
 
-void error_die(const char* msg) {
+enum ClientState
+{
+    STATE_LOGIN = 0,  
+    STATE_NORMAL
+};
+
+struct ClientCtx
+{
+  int fd;
+  string user_id;
+  ClientState state;
+  
+  char read_buf[MAX_BUF];
+  int read_pos;
+
+  char write_buf[MAX_BUF];
+  int write_pos;
+
+  ClientCtx()
+    :fd(-1), state(STATE_LOGIN), read_pos(0), write_pos(0)
+    {
+        memset(read_buf, 0, MAX_BUF);
+        memset(write_buf, 0, MAX_BUF);
+    }
+
+};
+
+void error_die(const char* msg)
+{
     perror(msg);
     exit(1);
 }
 
-// 客户端连接信息
-struct ClientInfo {
-    int sockfd;
-    string user_id;
-    std::mutex send_mtx;  // 保护send操作
-    std::atomic<bool> running{true};
-};
 
 // 全局资源
-mutex mtx1;  // 保护Inbox
+mutex mtx_box;  // Inbox锁
 mutex clients_mtx;  // 保护OnlineClients
 unordered_map<string, vector<string>> Inbox;
-unordered_map<string, ClientInfo*> OnlineClients;
+unordered_map<string, ClientCtx*> OnlineClients;
+
+int epfd = -1;
 
 // 函数声明
 void Inbox_add(const char*, const char*);
-void Inbox_send(ClientInfo*);
-int recv_all(int, char*, int);
-int send_pkg(int, char, const char*, int);
-int recv_user_id(int, char*, ClientInfo*);
-void recv_msg_loop(int, ClientInfo*);
-void recv_msg(int, ClientInfo*);
-void task(int);
+void Inbox_send(ClientCtx*);
 int startup(u_short*);
-void handle_client_disconnect(ClientInfo*);
 void notify_user(const string&);
+int  epoll_add(int , int , uint32_t , ClientCtx* );
+void handler(ClientCtx* );
+int read_msg(ClientCtx* );
+int write_msg(ClientCtx *);
+void append_pkg(ClientCtx*, char, const char*, int );
+int  epoll_mod(int , int , uint32_t , ClientCtx* );
+void close_client(int , ClientCtx*); 
+int epoll_del(int , int );  
 
-// 发送数据包（带协议头部）
-int send_pkg(int sockfd, char type, const char* str, int len) {
-    char head[5];
-    head[0] = type;
-    head[1] = (len >> 24) & 0xff;
-    head[2] = (len >> 16) & 0xff;
-    head[3] = (len >> 8) & 0xff;
-    head[4] = len & 0xff;
-    
-    if (send(sockfd, head, 5, 0) < 0) return -1;
-    if (send(sockfd, str, len, 0) < 0) return -1;
+
+
+
+int epoll_del(int epfd, int fd )
+{
+    return epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr); 
+}
+
+
+
+void close_client(int epfd, ClientCtx* ct) //关闭
+{
+    int fd = ct->fd;
+    epoll_del(epfd, fd);
+
+    {
+        lock_guard<mutex> lk(clients_mtx);
+        if(!ct->user_id.empty())
+        {
+            OnlineClients.erase(ct->user_id);
+            printf("用户 %s 已下线\n", ct->user_id.c_str());
+        }
+    }
+
+    close(fd);
+    delete(ct);
+}
+
+
+
+int write_msg(ClientCtx* ct)
+{
+
+    int sent = 0;
+    int total = ct->write_pos; 
+    int fd = ct->fd;
+    while(sent < total)
+    {
+        int n = send(fd, ct->write_buf + sent, total - sent,  MSG_NOSIGNAL);
+        if(n > 0)
+        {
+        sent += n;
+        }
+        else
+        {
+            if( errno == EAGAIN || errno == EWOULDBLOCK)
+            break;
+            return -1;
+        }
+    }
+    if(sent == total)
+    {
+        memset(ct->write_buf, 0, MAX_BUF);
+        ct->write_pos = 0;
+        epoll_mod(epfd, fd, EPOLLIN | EPOLLET, ct);
+    }
+    else
+    {
+        int remain = total - sent;
+        memmove(ct->write_buf, ct->write_buf + sent, remain);
+        ct->write_pos = remain;
+    }
     return 0;
 }
 
+
+
+void append_pkg(ClientCtx* ct, char type, const char* msg, int len)
+{
+    if(len + HEAD_LEN > MAX_BUF - ct->write_pos)
+    return ;
+    char head[HEAD_LEN];
+    head[0] = type;
+    head[1] = (len >> 24) & 0xFF;
+    head[2] = (len >> 16) & 0xFF;
+    head[3] = (len >> 8) & 0xFF;
+    head[4] = (len)     & 0xFF;
+    memcpy(ct -> write_buf + ct->write_pos, head, HEAD_LEN);
+    ct->write_pos += HEAD_LEN; 
+    memcpy(ct -> write_buf + ct->write_pos, msg, len);
+    ct->write_pos += len;
+    epoll_mod(epfd, ct->fd, EPOLLIN | EPOLLOUT | EPOLLET, ct);
+}
+
+
+
+void handler(ClientCtx* ct)
+{
+    char* buf = ct->read_buf;
+    int len = ct->read_pos;
+    int pos = 0;
+    while( pos + HEAD_LEN <= len)
+    {
+        int type = buf[pos];
+        int body_len = (buf[pos + 1] << 24) | (buf[pos + 2] << 16) | (buf[pos + 3] << 8) | buf[pos + 4];
+        pos += HEAD_LEN;
+        
+        if( pos + body_len > len)
+            break;
+            
+        char* body = buf + pos;
+        
+        if(ct->state == STATE_LOGIN)
+        {
+            if(type == 1)
+            {
+                char user[USER_ID_LEN] = {0};
+                strncpy(user, body, USER_ID_LEN - 1);
+                ct->user_id = user;
+                ct->state = STATE_NORMAL;
+                {
+                    lock_guard<mutex> lk(clients_mtx);
+                    OnlineClients[user] = ct;
+                }
+                printf("用户 %s 已上线\n", user);
+                Inbox_send(ct);
+            }
+            pos += body_len;
+        }else if  (ct->state == STATE_NORMAL)
+        {
+            if(type == 3)
+            {
+                char msg[MAX_BUF] = {0};
+                lock_guard<mutex> lk(clients_mtx);
+                if(OnlineClients.empty())
+                {
+                    strcpy(msg, "没有人在线喵~ 空悲切 ");
+                }else
+                {
+                    char tmp[128] = "在线用户有 :";
+                    int p = strlen(tmp);
+                    for(const auto& it : OnlineClients)
+                    {
+                        p += snprintf(tmp + p, sizeof(tmp) - p," %s", it.first.c_str());
+                    }
+                    strncpy(msg, tmp, sizeof(msg)-1);
+                }
+                append_pkg(ct, 3, msg, strlen(msg));
+                pos += body_len;
+                continue;
+            }else
+            {
+                char* c = body;
+                while (*c != '?' && *c != '\0') 
+                {
+                     c++;
+                }
+                if (*c == '\0') 
+                {
+                    pos += body_len;
+                    continue;
+                }
+        
+                *c = '\0';
+                 c++;
+                
+                char msg_content[MAX_BUF] = {0};
+                char target_user[USER_ID_LEN] = {0};
+                strncpy(msg_content, c, sizeof(msg_content) - 1);
+                msg_content[sizeof(msg_content) - 1] = '\0';
+                strncpy(target_user, body, sizeof(target_user) - 1);
+                target_user[sizeof(target_user) - 1] = '\0';
+        
+                printf("用户 %s 发送消息给 %s: %s\n", ct->user_id.c_str(), target_user, msg_content);
+        
+                Inbox_add(target_user, msg_content);
+                notify_user(target_user);
+            }
+        }
+        pos += body_len;
+    }
+    
+    if(pos > 0 && pos < len)
+    {
+        memmove(ct->read_buf, ct->read_buf + pos, len - pos);
+    }
+    ct->read_pos = len - pos;
+}
+
+
+
+//读取到缓冲区
+int read_msg(ClientCtx* ct)
+{
+    char* buf = ct->read_buf + ct->read_pos;
+    int left = MAX_BUF - ct->read_pos;
+
+    while(1)
+    {
+        int n = recv(ct->fd, buf, left, 0);
+        if( n > 0)
+        {
+            ct->read_pos += n;
+            buf += n;
+            left -=n;
+            if(left <= 0) break;
+        }
+        else if(n == 0)
+        {
+            return -1;  
+        }
+        else{
+            if(errno == EAGAIN || errno == EWOULDBLOCK)
+            break;
+            return -1;
+        }
+    }
+    return 0;
+
+}
+
+int  epoll_add(int epfd, int fd, uint32_t events, ClientCtx* ct)
+{
+    struct epoll_event ev;
+    ev.events = events;
+    ev.data.ptr = ct;
+    return epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
+}
+
+
+//修改监听事件 -> 触发写 开始发送信息
+int  epoll_mod(int epfd, int fd, uint32_t events, ClientCtx* ct)
+{
+    struct epoll_event ev;
+    ev.events = events;
+    ev.data.ptr = ct;
+    return epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev);
+}
+
+
+
 // 通知特定用户有新消息
 void notify_user(const string& user_id) {
-    ClientInfo* client = NULL;
+    ClientCtx* client = NULL;
    {
     lock_guard<mutex> lk(clients_mtx);
     auto it = OnlineClients.find(user_id);
@@ -85,190 +327,45 @@ void notify_user(const string& user_id) {
    if(client) Inbox_send(client);
 }
 
-// 处理客户端断开连接
-void handle_client_disconnect(ClientInfo* client) {
-    client->running = false;
-    
-    // 从在线列表中移除
-    lock_guard<mutex> lk(clients_mtx);
-    auto it = OnlineClients.find(client->user_id);
-    if (it != OnlineClients.end() && it->second == client) {
-        OnlineClients.erase(it);
-        printf("用户 %s 已断开\n", client->user_id.c_str());
-    }
-    
-    close(client->sockfd);
-    delete client;
-}
 
-// 接收完整数据
-int recv_all(int sockfd, char* buf, int len) {
-    int received = 0;
-    while (received < len) {
-        int r = recv(sockfd, buf + received, len - received, 0);
-        if (r <= 0) return -1;
-        received += r;
-    }
-    return 0;
-}
-
-// 接收消息循环
-void recv_msg_loop(int sockfd, ClientInfo* client) {
-    char head[5];
-    char buf[1024];
-    char target[10];
-    char msg[1024];
-
-    while (client->running) {
-        if (recv_all(sockfd, head, 5) < 0) break;
-        
-        int type = head[0];
-
-        int len = (head[1] << 24) | (head[2] << 16) | (head[3] << 8) | head[4];
-        if (len <= 0 || len >= sizeof(buf)) break;
-        if (recv_all(sockfd, buf, len) < 0) break;
-        
-        buf[len] = '\0';
-        if( type == 3) // 查询在线用户列表功能 ~
-        {
-            printf("%s\n", buf);
-            lock_guard<mutex> lk(clients_mtx);
-            if(OnlineClients.empty())
-            {
-                strncpy(msg, "没有人在线喵~ 空悲切 ", sizeof(msg) - 1);
-                msg[sizeof(msg) - 1] = '\0';
-            }else
-            {
-                char tmp[128] = "在线用户有 :";
-                int pos = strlen(tmp);
-                const int size = sizeof(tmp);
-             for( const auto& it : OnlineClients )
-             {
-                const char* p = it.first.c_str();
-                int ret = snprintf( tmp + pos, size, " %s", p);
-                pos+= ret;
-                if(pos > size) break;
-             }
-             strncpy(msg, tmp, sizeof(msg));
-             msg[sizeof(msg) - 1] = '\0';
-            }
-            send_pkg(sockfd, 3, msg, strlen(msg));
-            continue;
-        }
-        // 解析消息格式：目标ID?消息内容
-        char* c = buf;
-        while (*c != '?' && *c != '\0') {
-            c++;
-        }
-        if (*c == '\0') continue;  // 格式错误
-        
-        *c = '\0';
-        c++;
-        strncpy(msg, c, sizeof(msg) - 1);
-        msg[sizeof(msg) - 1] = '\0';
-        strncpy(target, buf, sizeof(target) - 1);
-        target[sizeof(target) - 1] = '\0';
-        
-        printf("用户 %s 发送消息给 %s: %s\n", client->user_id.c_str(), target, msg + 5);
-        
-        // 存入目标用户收件箱
-        Inbox_add(target, msg);
-        
-        // 立即通知目标用户（如果在线）
-        notify_user(target);
-    }
-}
-
-// 接收用户ID
-int recv_user_id(int sockfd, char* user, ClientInfo* client) {
-    char head[5];
-    char buf[64];
-    if (recv_all(sockfd, head, 5) < 0) return -1;
-    if (head[0] != 1) return -1;
-    int len = (head[1] << 24) | (head[2] << 16) | (head[3] << 8) | head[4];
-    if (len <= 0 || len > 64) return -1;
-    if (recv_all(sockfd, buf, len) < 0) return -1;
-
-    buf[len] = '\0';
-    strncpy(user, buf, 9);
-    user[9] = '\0';
-    
-    // 注册到在线用户列表
-    client->user_id = user;
-    lock_guard<mutex> lk(clients_mtx);
-    OnlineClients[user] = client;
-    
-    printf("用户 %s 已上线\n", user);
-    return 0;
-}
-
-// 接收消息线程入口
-void recv_msg(int sockfd, ClientInfo* client) {
-    char user[10] = {0};
-    if (recv_user_id(sockfd, user, client) == 0) {
-        Inbox_send(client);
-        recv_msg_loop(sockfd, client);
-    }
-    handle_client_disconnect(client);
-}
 
 // 添加消息到收件箱
 void Inbox_add(const char* target, const char* msg) {
-    lock_guard<mutex> lk(mtx1);
+    lock_guard<mutex> lk(mtx_box);
     Inbox[target].push_back(msg);
 }
 
 // 发送收件箱消息给客户端
-void Inbox_send(ClientInfo* client) {
-    if (!client->running) return;
-    
-    lock_guard<mutex> lk1(mtx1);
-    lock_guard<mutex> lk2(client->send_mtx);
+void Inbox_send(ClientCtx* client) {
+     
+    lock_guard<mutex> lk1(mtx_box);
     
     auto it = Inbox.find(client->user_id);
-    if (it == Inbox.end()) return;
+    if (it == Inbox.end() || it->second.empty()) return;
     vector<string>& vec = it->second;
-    if (vec.empty()) return;
     
     for (const string& s : vec) {
-        if (send_pkg(client->sockfd, 3, s.c_str(), s.length()) < 0) {
-            client->running = false;
-            break;
-        }
+        append_pkg(client, 3, s.c_str(), s.size());
     }
     vec.clear();
 }
 
-// 处理单个客户端连接
-void task(int sockfd) {
-    ClientInfo* client = new ClientInfo();
-    client->sockfd = sockfd;
-    
-    thread msg_thread(&recv_msg, sockfd, client);
-    msg_thread.detach();
-    
-    // 主线程等待接收线程结束
-    while (client->running) {
-        this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-}
 
 // 服务器启动
-int startup(u_short port) {
-    
-    //int epfd = epoll_create1(0);
+int startup(u_short* port)  
+{
 
-    int listen_fd = socket(AF_INET, SOCK_STREAM | sock_NONBLOCK, 0);
+    int listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     struct sockaddr_in name;
     memset(&name, 0, sizeof(name));
     name.sin_family = AF_INET;
-    name.sin_port = htons(port);
+    name.sin_port = htons(*port);  
     name.sin_addr.s_addr = htonl(INADDR_ANY);
     
     int on = 1;
     if(setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
     {
-        error_die();
+        error_die("setsockopt");  
     }
     
     if (bind(listen_fd, (struct sockaddr*)&name, sizeof(name)) < 0) {
@@ -279,9 +376,9 @@ int startup(u_short port) {
         socklen_t namelen = sizeof(name);
         if (getsockname(listen_fd, (struct sockaddr*)&name, &namelen) < 0)
         {
-            error_die();
+            error_die("getsockname");  
         }
-        port = ntohs(name.sin_port);
+        *port = ntohs(name.sin_port);  
     }
     
     if (listen(listen_fd, 5) < 0) {
@@ -292,61 +389,84 @@ int startup(u_short port) {
 }
 
 int main() {
-    /*int server_sock = -1;
-    int client_sock = -1;
-    struct sockaddr_in client_name;
-    socklen_t client_name_len = sizeof(client_name);
-    
-    server_sock = startup(&port);
-    printf("Server running on port %d\n", port);*/
-     int epfd = epoll_create1(0);
-     int listen_fd = startup(LISTEN_PORT);
-     struct epoll_event ev;
-     ev.data.fd = listen_fd;
-     ev.events = EPOLLIN | EPOLLET;
-     epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
 
+     u_short port = 4000;
+
+     int listen_fd = startup(&port);
+     printf("Server running on port %d\n", port);
+
+
+     epfd = epoll_create1(0);
+     if(epfd < 0) error_die("epoll_create");
+
+     epoll_add(epfd, listen_fd, EPOLLIN | EPOLLET, nullptr);
+    
      struct epoll_event events[MAX_EVENTS];
-     printf("epoll服务端启动,监听端口:%d\n", LISTEN_PORT);
 
     while(1)
     {
+        bool need_close = false;
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
-         if (nfds < 0)
-        {
-            perror("epoll_wait error");
-            break;
-        }
+         if (nfds < 0) error_die("epoll_wait");
 
         for(int i = 0; i < nfds; i++)
         {
-            int cur_fd = events[i].data.fd;
+            void* ptr = events[i].data.ptr;
             uint32_t pre_event = events[i].events;
 
-            if(cur_fd == listen_fd && (pre_event & EPOLLIN))
+            if(ptr == nullptr)
             {
-                struct sockaddr_in client_addr;
-                socklen_t addr_len = sizeof(client_addr);
+                if (!(pre_event & EPOLLIN)) continue;
+               
                 while(1)
                 {
+                    struct sockaddr_in client_addr;
+                    socklen_t addr_len = sizeof(client_addr);
+
                     int client_fd = accept4(listen_fd, (struct sockaddr*)&client_addr, &addr_len, SOCK_NONBLOCK);
+                    if (client_fd < 0)
+                    {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            break;
+                        perror("accept failed");
+            
+                    }
+                    printf("新连接: %s\n", inet_ntoa(client_addr.sin_addr));
+                    
+                    ClientCtx* ct = new ClientCtx();
+                    ct->fd = client_fd;
+                    epoll_add(epfd, client_fd, EPOLLIN | EPOLLET, ct);
+                }
+            }
+            else 
+            {
+                ClientCtx* ct = (ClientCtx*)ptr;
+
+                if(pre_event & EPOLLIN)
+                {
+                    if(read_msg(ct) < 0)
+                    {
+                        need_close = true;
+                    }
+                    else
+                    {
+                        handler(ct);
+                    }
+                }
+                if(!need_close && (pre_event & EPOLLOUT))
+                {
+                    if(write_msg(ct) < 0)
+                        need_close = true;
+                }
+                if ((pre_event & (EPOLLHUP | EPOLLERR)) || need_close)
+                {
+                    close_client(epfd, ct);
                 }
             }
         }
     }
-    /*while (1) {
-        client_sock = accept(server_sock, (struct sockaddr*)&client_name, &client_name_len);
-        if (client_sock == -1) {
-            error_die("accept");
-        }
-        
-        printf("新连接: %s\n", inet_ntoa(client_name.sin_addr));
-        
-        thread newthread(&task, client_sock);
-        newthread.detach();
-    }*/
     
-    close(server_sock);
+    close(listen_fd);
+    close(epfd);
     return 0;
 }
-//2026 6.9 学了epoll 开始大改！
