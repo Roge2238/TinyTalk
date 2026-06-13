@@ -119,6 +119,12 @@ int write_msg(ClientCtx* ct)
     int sent = 0;
     int total = ct->write_pos; 
     int fd = ct->fd;
+    if (total == 0) {
+        // 确保不会不必要地监听EPOLLOUT
+        epoll_mod(epfd, fd, EPOLLIN | EPOLLET, ct);
+        return 0;
+    }
+
     while(sent < total)
     {
         int n = send(fd, ct->write_buf + sent, total - sent,  MSG_NOSIGNAL);
@@ -144,14 +150,21 @@ int write_msg(ClientCtx* ct)
         int remain = total - sent;
         memmove(ct->write_buf, ct->write_buf + sent, remain);
         ct->write_pos = remain;
+         memset(ct->write_buf + ct->write_pos, 0, MAX_BUF - ct->write_pos);
+
     }
     return 0;
 }
 
 
-
+//包装协议 放入写缓冲区
 void append_pkg(ClientCtx* ct, char type, const char* msg, int len)
 {
+   
+    if(len + HEAD_LEN > MAX_BUF - ct->write_pos) {
+        fprintf(stderr, "[append_pkg] BUFFER FULL! Dropping.\n");
+        return;
+    }
     if(len + HEAD_LEN > MAX_BUF - ct->write_pos)
     return ;
     char head[HEAD_LEN];
@@ -164,24 +177,37 @@ void append_pkg(ClientCtx* ct, char type, const char* msg, int len)
     ct->write_pos += HEAD_LEN; 
     memcpy(ct -> write_buf + ct->write_pos, msg, len);
     ct->write_pos += len;
-    epoll_mod(epfd, ct->fd, EPOLLIN | EPOLLOUT | EPOLLET, ct);
+    if(epoll_mod(epfd, ct->fd, EPOLLIN | EPOLLOUT | EPOLLET, ct) < 0)
+        perror("[append_pkg] epoll_mod failed");
 }
 
 
-
+//处理
 void handler(ClientCtx* ct)
 {
     char* buf = ct->read_buf;
     int len = ct->read_pos;
     int pos = 0;
+
     while( pos + HEAD_LEN <= len)
     {
         int type = buf[pos];
         int body_len = (buf[pos + 1] << 24) | (buf[pos + 2] << 16) | (buf[pos + 3] << 8) | buf[pos + 4];
         pos += HEAD_LEN;
-        
-        if( pos + body_len > len)
+         if(body_len < 0 || body_len > MAX_BUF)
+        {
+            fprintf(stderr, "[handler] Invalid body_len: %d\n", body_len);
+            ct->read_pos = 0;
+            memset(ct->read_buf, 0, MAX_BUF);
+            return;
+        }
+
+         if( pos + body_len > len)
+        {
+            pos -= HEAD_LEN;
             break;
+        }
+       
             
         char* body = buf + pos;
         
@@ -191,6 +217,7 @@ void handler(ClientCtx* ct)
             {
                 char user[USER_ID_LEN] = {0};
                 strncpy(user, body, USER_ID_LEN - 1);
+                user[USER_ID_LEN - 1] = '\0';
                 ct->user_id = user;
                 ct->state = STATE_NORMAL;
                 {
@@ -200,9 +227,8 @@ void handler(ClientCtx* ct)
                 printf("用户 %s 已上线\n", user);
                 Inbox_send(ct);
             }
-            pos += body_len;
-        }else if  (ct->state == STATE_NORMAL)
-        {
+        }else if (ct->state == STATE_NORMAL)//??????
+        {  
             if(type == 3)
             {
                 char msg[MAX_BUF] = {0};
@@ -212,29 +238,29 @@ void handler(ClientCtx* ct)
                     strcpy(msg, "没有人在线喵~ 空悲切 ");
                 }else
                 {
-                    char tmp[128] = "在线用户有 :";
+                    char tmp[512] = "在线用户有 :";
                     int p = strlen(tmp);
+                    int remaining = sizeof(tmp) - p;
                     for(const auto& it : OnlineClients)
                     {
-                        p += snprintf(tmp + p, sizeof(tmp) - p," %s", it.first.c_str());
+                        int written = snprintf(tmp + p, remaining, " %s", it.first.c_str());
+                        if(written <= 0 || written >= remaining)
+                            break;
+                        p += written;
+                        remaining -= written;
                     }
                     strncpy(msg, tmp, sizeof(msg)-1);
                 }
                 append_pkg(ct, 3, msg, strlen(msg));
-                pos += body_len;
-                continue;
-            }else
+                
+            }else if(type == 2)
             {
                 char* c = body;
                 while (*c != '?' && *c != '\0') 
                 {
                      c++;
                 }
-                if (*c == '\0') 
-                {
-                    pos += body_len;
-                    continue;
-                }
+                
         
                 *c = '\0';
                  c++;
@@ -246,7 +272,7 @@ void handler(ClientCtx* ct)
                 strncpy(target_user, body, sizeof(target_user) - 1);
                 target_user[sizeof(target_user) - 1] = '\0';
         
-                printf("用户 %s 发送消息给 %s: %s\n", ct->user_id.c_str(), target_user, msg_content);
+                printf("用户 %s 发送消息给 %s: %s\n", ct->user_id.c_str(), target_user, msg_content + 6);//神奇的操作
         
                 Inbox_add(target_user, msg_content);
                 notify_user(target_user);
@@ -258,13 +284,19 @@ void handler(ClientCtx* ct)
     if(pos > 0 && pos < len)
     {
         memmove(ct->read_buf, ct->read_buf + pos, len - pos);
+        ct->read_pos = len - pos;
+        memset(ct->read_buf + ct->read_pos, 0, MAX_BUF - ct->read_pos);
     }
-    ct->read_pos = len - pos;
+    else if(pos >= len)
+    {
+        ct->read_pos = 0;
+        memset(ct->read_buf, 0, MAX_BUF);
+    }
 }
 
 
 
-//读取到缓冲区
+//读取到读缓冲区
 int read_msg(ClientCtx* ct)
 {
     char* buf = ct->read_buf + ct->read_pos;
@@ -329,7 +361,7 @@ void notify_user(const string& user_id) {
 
 
 
-// 添加消息到收件箱
+// 添加消息到Inbox
 void Inbox_add(const char* target, const char* msg) {
     lock_guard<mutex> lk(mtx_box);
     Inbox[target].push_back(msg);
@@ -337,7 +369,7 @@ void Inbox_add(const char* target, const char* msg) {
 
 // 发送收件箱消息给客户端
 void Inbox_send(ClientCtx* client) {
-     
+
     lock_guard<mutex> lk1(mtx_box);
     
     auto it = Inbox.find(client->user_id);
@@ -405,12 +437,13 @@ int main() {
 
     while(1)
     {
-        bool need_close = false;
+        
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
          if (nfds < 0) error_die("epoll_wait");
 
         for(int i = 0; i < nfds; i++)
         {
+            bool need_close = false;
             void* ptr = events[i].data.ptr;
             uint32_t pre_event = events[i].events;
 
@@ -440,16 +473,20 @@ int main() {
             }
             else 
             {
+                
                 ClientCtx* ct = (ClientCtx*)ptr;
 
                 if(pre_event & EPOLLIN)
                 {
+                    
                     if(read_msg(ct) < 0)
                     {
                         need_close = true;
+                    
                     }
                     else
                     {
+                        
                         handler(ct);
                     }
                 }
@@ -470,3 +507,9 @@ int main() {
     close(epfd);
     return 0;
 }
+//2026 6.6 来来来 直接一个recv 搞个微信出来试试喵 
+
+//2026 6.9 学了epoll 准备改造 
+
+
+//2026 6.13 简单用epoll重写了一下 感觉有点bug  问了下ai 解决不了 感觉架构有大问题 过几天再写写看 期末周了喵 谁能帮帮我 喵
