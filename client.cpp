@@ -99,7 +99,7 @@ int main(int argc, char* argv[])
         perror("连接失败");
         exit(1);
     }
-    printf("已连接到服务器\n");
+    printf("已连接到服务器\n"); 
 
     thread p(recv_msg, sockfd);
     p.detach();

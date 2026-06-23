@@ -6,7 +6,7 @@ build/
 *.out
 
 # 可执行文件
-Tinytalk
+
 chat_server
 
 # IDE 或编辑器临时文件
