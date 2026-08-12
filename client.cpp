@@ -1,3 +1,4 @@
+
 #include <cstdio>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -15,7 +16,13 @@
 #include <atomic>
 using namespace std;
 
+// 消息协议  Type 1 : 用户上线通知 Type 2 : 用户发送消息   Type 3 : 查询用户列表   Type 4 : 联机游戏(匹配/匹配成功)   Type 5 : 出拳/对局结果
+
+
+
 atomic<bool> g_running{true};
+atomic<bool> g_waiting{false};   // 是否在等待匹配
+atomic<bool> g_in_game{false};   // 是否在对局中(匹配成功后为true)
 
 int recv_all(int sockfd, char* buf, int len)
 {
@@ -34,14 +41,30 @@ void recv_msg(int sockfd)
     char buf[1025];
     while (g_running) {
         if (recv_all(sockfd, head, 5) < 0) break;
+        int type = head[0];
         int len = (head[1] << 24) | (head[2] << 16) | (head[3] << 8) | head[4];
         if (len <= 0 || len >= sizeof(buf)) continue;
         if (recv_all(sockfd, buf, len) < 0) break;
         buf[len] = '\0';
-        printf("\n[收到消息] %s\n", buf);
-        printf("输入消息: ");
+
+        if (type == 4) {
+            // 服务器通知: 匹配成功, 进入对局
+            g_waiting = false;
+            g_in_game = true;
+            printf("\n[游戏] %s\n", buf);
+        } else if (type == 5) {
+            printf("\n[猜拳] %s\n", buf);
+        } else {
+            printf("\n[收到消息] %s\n", buf);
+        }
+
+        if (g_in_game)
+            printf("出拳(1石头 2剪刀 3布): ");
+        else
+            printf("输入消息: ");
         fflush(stdout);
     }
+    printf("\n连接已断开\n");
 }
 
 int send_pkg(int sockfd, char type, const char* str)
@@ -113,7 +136,10 @@ int main(int argc, char* argv[])
     // Change: 删去上线信息  加入查询说明书功能
     printf("输入'o' 查看说明书\n");
     while (1) {
-        printf("输入消息: ");
+        if (g_in_game)
+            printf("出拳(1石头 2剪刀 3布): ");
+        else
+            printf("输入消息: ");
         fflush(stdout);
         fgets(premsg, sizeof(premsg), stdin);
         
@@ -130,15 +156,49 @@ int main(int argc, char* argv[])
             break;
         }
 
+        // 对局中: 输入 1/2/3 视为出拳
+        if (g_in_game)
+        {
+            if (strcmp(premsg, "1") == 0 || strcmp(premsg, "2") == 0 || strcmp(premsg, "3") == 0)
+            {
+                if (send_pkg(sockfd, 5, premsg) < 0) {
+                    printf("发送失败，连接可能已断开\n");
+                    break;
+                }
+            }
+            else
+            {
+                printf("对局中请输入出拳: 1石头 2剪刀 3布 喵~\n");
+            }
+            continue;
+        }
+
         if (strcmp(premsg, "o") == 0 )
         {
-          printf("1)输入's' 查询在线列表\n2)输入'quit' or 'exit'退出\n3)输入 '@ + 用户id +消息' 发送消息 如'@0001 绷住'\n" );
+          printf("1)输入's' 查询在线列表\n2)输入'quit' or 'exit'退出\n3)输入 '@ + 用户id +消息' 发送消息 如'@0001 绷住'\n 4) 输入'game' 联机猜拳 " );
           continue;
-        } 
+        } //查看用户列表
         if( strcmp(premsg, "s") == 0)
         {
          check_list(id, sockfd);
          continue;
+        }
+
+        if(strcmp(premsg , "game") == 0)
+        {
+            if (g_waiting || g_in_game)
+            {
+                printf("你已经在游戏中了喵~\n");
+                continue;
+            }
+            // 发送联机游戏申请(type 4), 由服务器匹配对手
+            if (send_pkg(sockfd, 4, "caiquan") < 0) {
+                printf("发送失败，连接可能已断开\n");
+                break;
+            }
+            g_waiting = true;
+            printf("已加入匹配, 等待对手...\n");
+            continue;
         }
 
         if(premsg[0] != '@') 

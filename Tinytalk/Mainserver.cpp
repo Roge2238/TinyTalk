@@ -1,4 +1,9 @@
 #include "server.h"
+#include "gameserver.h"
+#include <thread>
+
+std::atomic<bool> go_running{true};
+
 int main() {
 
      u_short port = 4000;
@@ -13,6 +18,10 @@ int main() {
      epoll_add(epfd, listen_fd, EPOLLIN | EPOLLET, nullptr);
     
      struct epoll_event events[MAX_EVENTS];
+
+    // 启动游戏服务线程
+    std::thread game_thread(GameService);
+    game_thread.detach();
 
     while(1)
     {

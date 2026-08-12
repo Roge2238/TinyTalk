@@ -1,8 +1,12 @@
 #include "server.h"
 #include "inbox.h"
+#include "gameserver.h"
 
 mutex clients_mtx;
 unordered_map<string, ClientCtx*> OnlineClients;
+
+extern GameManager game_manager;
+
 int epfd = -1;
 
 void error_die(const char* msg)
@@ -36,6 +40,8 @@ void close_client(int epfd, ClientCtx* ct) //关闭
         }
     }
 
+    game_manager.remove_player_list(ct);
+
     close(fd);
     delete(ct);
 }
@@ -45,6 +51,7 @@ void close_client(int epfd, ClientCtx* ct) //关闭
 int write_msg(ClientCtx* ct)
 {
 
+    lock_guard<mutex> lk(ct->write_mtx);
     int sent = 0;
     int total = ct->write_pos; 
     int fd = ct->fd;
@@ -89,7 +96,7 @@ int write_msg(ClientCtx* ct)
 //包装协议 放入写缓冲区
 void append_pkg(ClientCtx* ct, char type, const char* msg, int len)
 {
-   
+    lock_guard<mutex> lk(ct->write_mtx);
     if(len + HEAD_LEN > MAX_BUF - ct->write_pos) {
         fprintf(stderr, "[append_pkg] BUFFER FULL! Dropping.\n");
         return;
@@ -142,7 +149,7 @@ void handler(ClientCtx* ct)
         
         if(ct->state == STATE_LOGIN)
         {
-            if(type == 1)
+            if(type == 1)     //------------------------------用户上线通知
             {
                 char user[USER_ID_LEN] = {0};
                 strncpy(user, body, USER_ID_LEN - 1);
@@ -158,7 +165,7 @@ void handler(ClientCtx* ct)
             }
         }else if (ct->state == STATE_NORMAL)//??????
         {  
-            if(type == 3)
+            if(type == 3)         //-----------------------------     查询在线列表
             {
                 char msg[MAX_BUF] = {0};
                 lock_guard<mutex> lk(clients_mtx);
@@ -182,7 +189,7 @@ void handler(ClientCtx* ct)
                 }
                 append_pkg(ct, 3, msg, strlen(msg));
                 
-            }else if(type == 2)
+            }else if(type == 2) //-----------------------------  --- 用户发送消息 
             {
                 char* c = body;
                 while (*c != '?' && *c != '\0') 
@@ -205,7 +212,18 @@ void handler(ClientCtx* ct)
         
                 Inbox_add(target_user, msg_content);
                 notify_user(target_user);
+            }else if (type == 4 )
+            {
+                printf("%s 申请进行游戏\n", ct->user_id.c_str());
+                game_manager.add_player_list(ct);
+
+            }else if (type == 5 )
+            {
+                printf("%s 选择出拳 %s\n", ct->user_id.c_str(), body);
+                game_manager.handle_game_msg(ct, body, body_len);
+
             }
+
         }
         pos += body_len;
     }

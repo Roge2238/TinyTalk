@@ -47,6 +47,8 @@ struct ClientCtx
   char write_buf[MAX_BUF];
   int write_pos;
 
+  std::mutex write_mtx;   // 保护 write_buf / write_pos(网络线程与游戏线程共用)
+
   ClientCtx()
     :fd(-1), state(STATE_LOGIN), read_pos(0), write_pos(0)
     {
