@@ -8,6 +8,7 @@ add_executable(Tinytalk
     Mainserver.cpp
     server.cpp
     inbox.cpp
+    gameserver.cpp
 )
 
 find_package(Threads REQUIRED)
