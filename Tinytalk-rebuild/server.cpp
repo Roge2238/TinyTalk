@@ -1,5 +1,5 @@
 #include "server.h"
-
+#include "game_server.h"
 
 #define MAX_EPOLL_EVENT 10 // 待改
 
@@ -28,6 +28,68 @@ void connect_thread(int listen_fd)
         for(int i= 0; i < nfds; i++)
         {
             // 处理逻辑
+                void* ptr = events[i].data.ptr;
+                uint32_t pre_event = events[i].events;
+
+                if(ptr == nullptr)
+                {
+                    if (!(pre_event & EPOLLIN)) continue;
+                
+                    while(1)
+                    {
+                        struct sockaddr_in client_addr;
+                        socklen_t addr_len = sizeof(client_addr);
+
+                        int client_fd = accept4(listen_fd, (struct sockaddr*)&client_addr, &addr_len, SOCK_NONBLOCK);
+                        if (client_fd < 0)
+                        {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                                break;
+                            if (errno == EINTR)
+                                continue;
+                            perror("accept failed");
+                
+                        }
+                        printf("新连接: %s\n", inet_ntoa(client_addr.sin_addr));
+                        
+                        Session* sn = new Session();
+                        sn->fd = client_fd;
+                        epoll_add(epfd, client_fd, EPOLLIN | EPOLLET, sn);
+                    }
+                }
+                else
+                {
+                    Session* sn = (Session*)ptr;
+                    if(pre_event & EPOLLIN)
+                    {
+                        if(read_msg(sn) >= 0)
+                        {
+                            handler(sn);
+                        }
+                        else
+                        {
+                            //错误处理
+                        }
+
+
+                    }
+                    if(pre_event & EPOLLOUT)
+                    {
+                        if(write_msg(sn) < 0)
+                        {
+                            
+                            //错误处理
+                        }
+                    }
+
+                    if(pre_event & (EPOLLHUP | EPOLLERR))
+                    {
+                        //错误处理
+                    }
+
+
+                }
+            }
         }
 
 
@@ -35,9 +97,46 @@ void connect_thread(int listen_fd)
 
 
 
+int read_msg(Session* sn)
+{
+    //从内核缓冲区读取消息到用户态读缓冲区
+    char* buf = sn-> read_buf + sn->read_pos;
+    int left = MAX_BUF - sn->read_pos;
 
-
+    while()
+    {
+        int n = recv(sn -> sn, buf, left, 0);
+        if(n >0)
+        {
+            sn->read_pos += n;
+            buf +=n;
+            left-=n;
+            if(left <= 0) break;
+        }
+        else if(n == 0)
+        {
+            return -1;  
+        }
+        else
+        {
+            if(errno == EAGAIN || errno == EWOULDBLOCK)
+                break;
+            return -1;
+    }
+    return 0;
+    }
 }
+
+
+
+
+int write_msg(Session* sn)
+{
+    //向内核缓冲区写入消息
+    return 0;
+}
+
+
 
 
 
@@ -113,4 +212,21 @@ int startup(u_short* port)
     }
     
     return listen_fd;
+}
+
+
+
+
+void handler(Session* sn)
+{
+    // 处理client的消息
+
+    //从sn 的用户态缓冲区读取 处理 
+    
+
+
+
+
+
+
 }
