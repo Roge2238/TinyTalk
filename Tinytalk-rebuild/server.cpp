@@ -2,7 +2,7 @@
 #include "game_server.h"
 
 #define MAX_EPOLL_EVENT 10 // 待改
-
+#define HEAD_LEN 5
 
 
 
@@ -54,6 +54,7 @@ void connect_thread(int listen_fd)
                         
                         Session* sn = new Session();
                         sn->fd = client_fd;
+
                         epoll_add(epfd, client_fd, EPOLLIN | EPOLLET, sn);
                     }
                 }
@@ -97,6 +98,29 @@ void connect_thread(int listen_fd)
 
 
 
+
+void on_login(Session* session, uid* user_id)
+{
+    auto weak = session->get_weak_ptr();
+    // 捕获weak 获得 session的 消息槽    消息槽: 发送消息的权柄
+    sendFn out = [weak](const packet& pkg)
+    {
+        if(auto s = weak.lock())
+        {
+            // 发送消息的逻辑 
+            append_pkg(s.get(), pkg.type, pkg.body, pkg.len);
+        }
+    }
+    // 将user_id 和 send_Fn 绑定
+    send_slot_map.bind_send_fn(user_id, session->id, out);
+    
+
+}
+
+
+
+
+
 int read_msg(Session* sn)
 {
     //从内核缓冲区读取消息到用户态读缓冲区
@@ -105,7 +129,7 @@ int read_msg(Session* sn)
 
     while()
     {
-        int n = recv(sn -> sn, buf, left, 0);
+        int n = recv(sn -> fd, buf, left, 0);
         if(n >0)
         {
             sn->read_pos += n;
@@ -132,9 +156,73 @@ int read_msg(Session* sn)
 
 int write_msg(Session* sn)
 {
-    //向内核缓冲区写入消息
+
+    lock_guard<mutex> lk(sn->write_mtx);
+    int sent = 0;
+    int total = sn->write_pos; 
+    int fd = sn->fd;
+    if (total == 0) {
+        // 确保不会不必要地监听EPOLLOUT
+        epoll_mod(epfd, fd, EPOLLIN | EPOLLET, sn);
+        return 0;
+    }
+
+    while(sent < total)
+    {
+        int n = send(fd, sn->write_buf + sent, total - sent,  MSG_NOSIGNAL);
+        if(n > 0)
+        {
+        sent += n;
+        }
+        else
+        {
+            if( errno == EAGAIN || errno == EWOULDBLOCK)
+            break;
+            return -1;
+        }
+    }
+    if(sent == total)
+    {
+        memset(sn->write_buf, 0, MAX_BUF);
+        sn->write_pos = 0;
+        epoll_mod(epfd, fd, EPOLLIN | EPOLLET, sn);
+    }
+    else
+    {
+        int remain = total - sent;
+        memmove(sn->write_buf, sn->write_buf + sent, remain);
+        sn->write_pos = remain;
+        memset(sn->write_buf + sn->write_pos, 0, MAX_BUF - sn->write_pos);
+
+    }
     return 0;
 }
+
+
+//包装协议 放入写缓冲区
+void append_pkg(Session* sn, char type, const char* msg, int len)
+{
+    lock_guard<mutex> lk(sn->write_mtx);
+    if(len + HEAD_LEN > MAX_BUF - sn->write_pos) {
+        fprintf(stderr, "[append_pkg] BUFFER FULL! Dropping.\n");
+        return;
+    }
+    if(len + HEAD_LEN > MAX_BUF - sn->write_pos)
+    return ;
+    char head[HEAD_LEN];
+    head[0] = type;
+    head[1] = (len >> 24) & 0xFF;
+    head[2] = (len >> 16) & 0xFF;
+    head[3] = (len >> 8) & 0xFF;
+    head[4] = (len)     & 0xFF;
+    memcpy(sn -> write_buf + sn->write_pos, head, HEAD_LEN);
+    sn->write_pos += HEAD_LEN; 
+    memcpy(sn -> write_buf + sn->write_pos, msg, len);
+    sn->write_pos += len;
+    if(epoll_mod(epfd, sn->fd, EPOLLIN | EPOLLOUT | EPOLLET, sn) < 0)
+        perror("[append_pkg] epoll_mod failed");
+}
+
 
 
 
@@ -216,17 +304,142 @@ int startup(u_short* port)
 
 
 
+//专门解析消息类型 执行相关操作
+void type_handler(Session* sn, char type, char* body, int body_len)
+{    
+    if(sn->state == STATE_LOGIN)
+    {
+        if(type == 1)     //------------------------------用户上线通知
+        {
+            char user[USER_ID_LEN] = {0};
+            strncpy(user, body, USER_ID_LEN - 1);
+            user[USER_ID_LEN - 1] = '\0';
+            sn->user_id = user;
+            sn->state = STATE_NORMAL;
+            {
+                lock_guard<mutex> lk(clients_mtx);
+                OnlineClients[user] = sn;
+            }
+            printf("用户 %s 已上线\n", user);
+
+            //注册消息槽
+            on_login(sn, user);
+
+            //发送历史消息
+            Inbox_send(sn);
+        }
+    }else if (sn->state == STATE_NORMAL)//??????
+    {  
+        if(type == 3)         //-----------------------------     查询在线列表
+        {
+            char msg[MAX_BUF] = {0};
+            lock_guard<mutex> lk(clients_mtx);
+            if(OnlineClients.empty())
+            {
+                strcpy(msg, "没有人在线喵~ 空悲切 ");
+            }else
+            {
+                char tmp[512] = "在线用户有 :";
+                int p = strlen(tmp);
+                int remaining = sizeof(tmp) - p;
+                for(const auto& it : OnlineClients)
+                {
+                    int written = snprintf(tmp + p, remaining, " %s", it.first.c_str());
+                    if(written <= 0 || written >= remaining)
+                        break;
+                    p += written;
+                    remaining -= written;
+                }
+                strncpy(msg, tmp, sizeof(msg)-1);
+            }
+            append_pkg(sn, 3, msg, strlen(msg));
+            
+        }else if(type == 2) //-----------------------------  --- 用户发送消息 
+        {
+            char* c = body;
+            while (*c != '?' && *c != '\0') 
+            {
+                    c++;
+            }
+            
+
+            *c = '\0';
+                c++;
+            
+            char msg_content[MAX_BUF] = {0};
+            char target_user[USER_ID_LEN] = {0};
+            strncpy(msg_content, c, sizeof(msg_content) - 1);
+            msg_content[sizeof(msg_content) - 1] = '\0';
+            strncpy(target_user, body, sizeof(target_user) - 1);
+            target_user[sizeof(target_user) - 1] = '\0';
+
+            printf("用户 %s 发送消息给 %s: %s\n", sn    ->user_id.c_str(), target_user, msg_content + 6);//神奇的操作
+
+            Inbox_add(target_user, msg_content);
+            notify_user(target_user);
+        }else if (type == 4 )
+            {
+                printf("%s 申请进行游戏\n", sn->user_id.c_str());
+                //加入在线玩家表
+                game_manager.add_player_table(sn->user_id); 
+
+            }else if (type == 5 )
+            {
+                printf("%s 选择出拳 %s\n", sn->user_id.c_str(), body);
+                game_manager.handle_game_msg(sn, body, body_len);
+
+            }
+
+    }
+}
+
+
 
 void handler(Session* sn)
 {
     // 处理client的消息
 
     //从sn 的用户态缓冲区读取 处理 
-    
+    char* buf = sn->read_buf;
+    int len = sn->read_pos;
+    int pos = 0;
 
+    while(pos + HEAD_LEN <= len)
+    {
+        int type = buf[pos];
+        int body_len = (buf[pos + 1] << 24) | (buf[pos + 2] << 16) | (buf[pos + 3] << 8) | buf[pos + 4];
+        pos += HEAD_LEN;
+        if(body_len < 0 || body_len > MAX_BUF)
+        {
+            fprintf(stderr, "[handler] Invalid body_len: %d\n", body_len);
+            sn->read_pos = 0;
+            memset(sn->read_buf, 0, MAX_BUF);
+            return;
+        }
 
+        if(pos + body_len > len)
+        {
+            pos -= HEAD_LEN;
+            break;
+        }
+        char* body = buf + pos;
+        type_handler(sn, type, body, body_len);
 
+        pos += body_len;
+    }
 
+    if(pos > 0 && pos < len)
+    {
+        memmove(sn ->read_buf, sn->read_buf + pos, len  - pos);
+        sn->read_pos = len - pos;
+        memset(sn->read_buf + sn->read_pos, 0, MAX_BUF - sn->read_pos);
+    }
 
+    if( pos >= len)
+    {
+        sn->read_pos = 0;
+        memset(sn ->read_buf, 0, MAX_BUF);
+    }
+   
 
 }
