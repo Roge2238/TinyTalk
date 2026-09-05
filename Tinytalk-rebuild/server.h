@@ -1,4 +1,5 @@
 
+#include <sys/timerfd.h>
 
 struct Packet
 {
@@ -47,6 +48,8 @@ class Session : public std::enable_shared_from_this<Session>
         char write_buf[MAX_BUF];
         int write_pos;  
         std::mutex write_mtx;
+
+        uint64_t deadline_ms;
 
         explicit Session(int fd, Id user_id) :
             fd(fd), id(user_id), state(STATE_INIT) {}

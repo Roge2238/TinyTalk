@@ -1,21 +1,37 @@
 #include "server.h"
 #include "game_server.h"
+#include "timeout_handle.h"
+
+
 
 #define MAX_EPOLL_EVENT 10 // 待改
 #define HEAD_LEN 5
 
+//断连检测 10s 
+#define CLIENT_TIME_OUT_MS 10000
+
+
+int epfd = -1;
+int timer_fd = -1;
 
 
 void connect_thread(int listen_fd)
 {
 
-    int epfd = epoll_create1(0);
+    epfd = epoll_create1(0);
+
+    //启用超时检测闹钟 time_fd;
+    timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+
+
+
     if(epfd < 0) error_doe("epoll_create");
     
     //开始只有listen_fd 原始监听
 
     epoll_add(epfd, listen_fd, EPOLLIN | EPOLLET, nullptr);
 
+    epoll_add(epfd, timer_fd, EPOLLIN, nullptr);
     //储存监听事件数组
     struct epoll_event events[MAX_EPOLL_EVENT];
 
@@ -28,70 +44,82 @@ void connect_thread(int listen_fd)
         for(int i= 0; i < nfds; i++)
         {
             // 处理逻辑
-                void* ptr = events[i].data.ptr;
-                uint32_t pre_event = events[i].events;
+            void* ptr = events[i].data.ptr;
+            uint32_t pre_event = events[i].events;
 
-                if(ptr == nullptr)
+            int fd = events[i].data.fd;
+
+            if(fd == timer_fd)
+            {
+                //闹钟响
+                handle_timeout();
+            }
+
+
+            if(fd == listen_fd && ptr == nullptr)
+            {
+                if (!(pre_event & EPOLLIN)) continue;
+            
+                while(1)
                 {
-                    if (!(pre_event & EPOLLIN)) continue;
-                
-                    while(1)
+                    struct sockaddr_in client_addr;
+                    socklen_t addr_len = sizeof(client_addr);
+
+                    int client_fd = accept4(listen_fd, (struct sockaddr*)&client_addr, &addr_len, SOCK_NONBLOCK);
+                    if (client_fd < 0)
                     {
-                        struct sockaddr_in client_addr;
-                        socklen_t addr_len = sizeof(client_addr);
-
-                        int client_fd = accept4(listen_fd, (struct sockaddr*)&client_addr, &addr_len, SOCK_NONBLOCK);
-                        if (client_fd < 0)
-                        {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                                break;
-                            if (errno == EINTR)
-                                continue;
-                            perror("accept failed");
-                
-                        }
-                        printf("新连接: %s\n", inet_ntoa(client_addr.sin_addr));
-                        
-                        Session* sn = new Session();
-                        sn->fd = client_fd;
-
-                        epoll_add(epfd, client_fd, EPOLLIN | EPOLLET, sn);
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            break;
+                        if (errno == EINTR)
+                            continue;
+                        perror("accept failed");
+            
                     }
+                    printf("新连接: %s\n", inet_ntoa(client_addr.sin_addr));
+                    
+                    Session* sn = new Session();
+                    sn->fd = client_fd;
+
+                    epoll_add(epfd, client_fd, EPOLLIN | EPOLLET, sn);
                 }
-                else
+            }
+            else
+            {
+                Session* sn = (Session*)ptr;
+                //重置用户超时计数
+                client_reset_timer(fd);
+                
+                if(pre_event & EPOLLIN)
                 {
-                    Session* sn = (Session*)ptr;
-                    if(pre_event & EPOLLIN)
+                    if(read_msg(sn) >= 0)
                     {
-                        if(read_msg(sn) >= 0)
-                        {
-                            handler(sn);
-                        }
-                        else
-                        {
-                            //错误处理
-                        }
-
-
+                        handler(sn);
                     }
-                    if(pre_event & EPOLLOUT)
-                    {
-                        if(write_msg(sn) < 0)
-                        {
-                            
-                            //错误处理
-                        }
-                    }
-
-                    if(pre_event & (EPOLLHUP | EPOLLERR))
+                    else
                     {
                         //错误处理
                     }
 
 
                 }
+                if(pre_event & EPOLLOUT)
+                {
+                    if(write_msg(sn) < 0)
+                    {
+                        
+                        //错误处理
+                    }
+                }
+
+                if(pre_event & (EPOLLHUP | EPOLLERR))
+                {
+                    //错误处理
+                }
+
+
             }
         }
+    }
 
 
     }
@@ -441,5 +469,15 @@ void handler(Session* sn)
         memset(sn ->read_buf, 0, MAX_BUF);
     }
    
+
+}
+
+
+
+
+//处理客户端关闭时的资源释放
+void close_client()
+{
+
 
 }
