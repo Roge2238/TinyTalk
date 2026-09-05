@@ -14,6 +14,8 @@
 int epfd = -1;
 int timer_fd = -1;
 
+extern game_manager;
+
 
 void connect_thread(int listen_fd)
 {
@@ -88,7 +90,7 @@ void connect_thread(int listen_fd)
                 Session* sn = (Session*)ptr;
                 //重置用户超时计数
                 client_reset_timer(fd);
-                
+
                 if(pre_event & EPOLLIN)
                 {
                     if(read_msg(sn) >= 0)
@@ -476,8 +478,22 @@ void handler(Session* sn)
 
 
 //处理客户端关闭时的资源释放
-void close_client()
+void free_resource(uid user_id)
 {
+    //将此id 对应的所有对象全部释放 
+    //注： id 具有唯一性
+
+    //删除在线表内的用户
+    
+
+    //删除用户游戏实例
+    game_manager.del_player_from_table();
+
+
+
+
 
 
 }
+
+

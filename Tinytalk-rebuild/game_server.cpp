@@ -46,3 +46,21 @@ void GameMananger::add_player_table(std::string user_id)
 
     }
 }
+
+
+
+
+void GameManager:: del_player_from_table(std:: string user_id)
+{
+
+    {
+        lock_guard<std::mutex> lock(player_table_mtx);
+        auto it = player_table.find(user_id);
+        if (it != player_table.end())
+        {
+            //erase 会调用shared_ptr的析构 完全没问题！！
+            player_table.erase(it);
+        }
+    }
+
+}
