@@ -10,11 +10,19 @@
 //断连检测 10s 
 #define CLIENT_TIME_OUT_MS 10000
 
+//global 
 
 int epfd = -1;
 int timer_fd = -1;
+Account_table account_table;
+std::mutex account_table_mtx;
+
 
 extern game_manager;
+
+
+
+
 
 
 void connect_thread(int listen_fd)
@@ -475,22 +483,37 @@ void handler(Session* sn)
 }
 
 
+//
+void close_client_session(int epfd, Session* sn)
+{
+    int fd = sn -> fd;
+    epoll_del(epfd, fd);
+
+    {
+        lock_guard<std::mutex> lk(account_table_mtx);
+        if(!sn->user_id.empty())
+        {
+            account_table.erase(sn->user_id);
+            printf("用户%s 已下线\n", user_id);
+        }
+    }
+
+    close(fd);
+    delete(sn);
+}
 
 
 //处理客户端关闭时的资源释放
-void free_resource(uid user_id)
+void free_resource(uid user_id, int epfd)
 {
     //将此id 对应的所有对象全部释放 
     //注： id 具有唯一性
 
     //删除在线表内的用户
-    
+    close_client_session(epfd, user_id);
 
     //删除用户游戏实例
-    game_manager.del_player_from_table();
-
-
-
+    game_manager.del_player_from_table(user_id);
 
 
 
