@@ -137,3 +137,11 @@ std::shared_ptr<Player> GameManager:: Get_player_from_table(std::string user_id)
 
 
 }
+
+
+void GameManager:: Update_player_GameData(char* data_buf)
+{
+
+
+
+}

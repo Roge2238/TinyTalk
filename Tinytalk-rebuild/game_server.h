@@ -10,6 +10,17 @@
 #include <thread>
 #include <unordered_map>
 
+
+typedef struct GameFrame
+{
+
+};
+
+
+
+// 思考良久 接收用户游戏数据信息采用异步  type_handler里面对应 消息类型直接拷贝进GameData 
+// 之所以不用类似sendFn的 readFn 因为 会存在与handler函数的竞争 干涉其他类型消息的处理 且如何分离游戏类型消息很复杂
+
 struct GameData
 {
     int a;
@@ -40,8 +51,10 @@ class GameManager
     void match_player();
     void add_player_table(std::string user_id);
     void del_player_from_table(std::string user_id);
-
-   
+    std::shared_ptr<Player> Get_player_from_table(std::string user_id);
+    void game_thread();
+    void come_on_game(std::weak_ptr<Player> p1, std::weak_ptr<Player> p2);
+    void Update_player_GameData(char* data);
 
     private:
     
