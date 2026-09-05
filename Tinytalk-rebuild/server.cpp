@@ -14,8 +14,9 @@
 
 int epfd = -1;
 int timer_fd = -1;
-Account_table account_table;
-std::mutex account_table_mtx;
+
+std:: unordered_map<std::string, Session*> online_table;
+std::mutex online_table_mtx;
 
 
 extern game_manager;
@@ -361,9 +362,9 @@ void type_handler(Session* sn, char type, char* body, int body_len)
             sn->user_id = user;
             sn->state = STATE_NORMAL;
             {
-                lock_guard<mutex> lk(account_table_mtx);
-                account_table[user] = sn;
-            }
+                lock_guard<mutex> lk(online_table_mtx);
+                online_table[user] = sn;
+            }       
             printf("用户 %s 已上线\n", user);
 
             //注册消息槽
@@ -378,7 +379,7 @@ void type_handler(Session* sn, char type, char* body, int body_len)
         {
             char msg[MAX_BUF] = {0};
             lock_guard<mutex> lk(clients_mtx);
-            if(OnlineClients.empty())
+            if(online_table.empty())
             {
                 strcpy(msg, "没有人在线喵~ 空悲切 ");
             }else
@@ -386,7 +387,7 @@ void type_handler(Session* sn, char type, char* body, int body_len)
                 char tmp[512] = "在线用户有 :";
                 int p = strlen(tmp);
                 int remaining = sizeof(tmp) - p;
-                for(const auto& it : OnlineClients)
+                for(const auto& it : online_table)
                 {
                     int written = snprintf(tmp + p, remaining, " %s", it.first.c_str());
                     if(written <= 0 || written >= remaining)
@@ -489,17 +490,17 @@ void handler(Session* sn)
 }
 
 
-//释放客户端对应Session对象 关闭fd epoll_del
+//释放客户端在线列表对象 关闭fd epoll_del
 void close_client_session(int epfd, Session* sn)
 {
     int fd = sn -> fd;
     epoll_del(epfd, fd);
 
     {
-        lock_guard<std::mutex> lk(account_table_mtx);
+        lock_guard<std::mutex> lk(online_table_mtx);
         if(!sn->user_id.empty())
         {
-            account_table.erase(sn->user_id);
+            online_table.erase(sn->user_id);
             printf("用户%s 已下线\n", sn->user_id);
         }
     }
@@ -521,7 +522,7 @@ void free_resource(uid user_id, int epfd)
     //删除用户游戏实例
     game_manager.del_player_from_table(user_id);
 
-
+    
 
 }
 
