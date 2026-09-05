@@ -2,13 +2,13 @@
 
 
 
-void GameMananger::add_player_table(std::string user_id)
+void GameManager::add_player_table(std::string user_id)
 {
     std::shared_ptr<Player> p;
     {
-        lock_gaurd<std::mutex>  lock(player_table_mtx);
-        aut it = player_table.find(user_id);
-        if(it! = player_table.end())
+        std::lock_guard<std::mutex>  lock(player_table_mtx);
+        auto it = player_table.find(user_id);
+        if(it != player_table.end())
         {
             p = it->second;   // 复用已有玩家对象
         }else
@@ -29,7 +29,7 @@ void GameMananger::add_player_table(std::string user_id)
     std::weak_ptr<Player> weak_p (p);
 
     {
-        lock_guard<std::mutex> lock(player_match_q_mtx);
+        std::lock_guard<std::mutex> lock(player_match_q_mtx);
         if(!p->queued.load() && !p->in_game.load())
         {
             p->queued.store(true);
@@ -54,7 +54,7 @@ void GameManager:: del_player_from_table(std:: string user_id)
 {
 
     {
-        lock_guard<std::mutex> lock(player_table_mtx);
+        std::lock_guard<std::mutex> lock(player_table_mtx);
         auto it = player_table.find(user_id);
         if (it != player_table.end())
         {
