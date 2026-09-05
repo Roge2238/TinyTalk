@@ -291,6 +291,12 @@ int epoll_mod(int epfd, int fd, uint32_t event, Session* sn)
 }
 
 
+// epoll删除
+int epoll_del(int epfd, int fd)
+{
+    return epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+}
+
 
 
 
@@ -355,8 +361,8 @@ void type_handler(Session* sn, char type, char* body, int body_len)
             sn->user_id = user;
             sn->state = STATE_NORMAL;
             {
-                lock_guard<mutex> lk(clients_mtx);
-                OnlineClients[user] = sn;
+                lock_guard<mutex> lk(account_table_mtx);
+                account_table[user] = sn;
             }
             printf("用户 %s 已上线\n", user);
 
@@ -483,7 +489,7 @@ void handler(Session* sn)
 }
 
 
-//
+//释放客户端对应Session对象 关闭fd epoll_del
 void close_client_session(int epfd, Session* sn)
 {
     int fd = sn -> fd;
@@ -494,10 +500,10 @@ void close_client_session(int epfd, Session* sn)
         if(!sn->user_id.empty())
         {
             account_table.erase(sn->user_id);
-            printf("用户%s 已下线\n", user_id);
+            printf("用户%s 已下线\n", sn->user_id);
         }
     }
-
+    // 将关闭fd写在这
     close(fd);
     delete(sn);
 }
