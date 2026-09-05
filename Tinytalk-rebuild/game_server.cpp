@@ -2,6 +2,66 @@
 
 
 
+
+
+//游戏线程入口 
+void GameManager:: game_thread()
+{
+    match_player();
+}
+
+
+
+
+void GameManager:: match_player()
+{
+    while(true)
+    {
+        std::weak_ptr<Player> p1, p2;
+        {
+            std::unique_lock<std::mutex> lock(player_match_q_mtx);
+            player_match_q_cv.wait(lock, [this] { return !player_match_q.empty(); });
+
+            if (player_match_q.size() >= 2)
+            {
+                p1 = player_match_q.front();
+                player_match_q.pop();
+                p2 = player_match_q.front();
+                player_match_q.pop();
+            }
+        }
+
+        if (p1.expired() && p2.expired())
+        {
+            continue; // 两个玩家都已经掉线，继续等待
+            // 对局线程持有 shared_ptr, 保证对局期间 Player 对象不会提前释放
+            std::thread t(&GameManager::come_on_game, this, p1, p2);
+            t.detach();
+        }
+    }
+}
+
+
+
+//加入游戏房间
+void GameManager::come_on_game(std::weak_ptr<Player> p1, std::weak_ptr<Player> p2)
+{
+
+
+
+
+}
+
+
+
+
+void wait();
+
+
+
+
+
+
 void GameManager::add_player_table(std::string user_id)
 {
     std::shared_ptr<Player> p;
@@ -62,5 +122,18 @@ void GameManager:: del_player_from_table(std:: string user_id)
             player_table.erase(it);
         }
     }
+
+}
+
+
+
+std::shared_ptr<Player> GameManager:: Get_player_from_table(std::string user_id)
+{
+    std::lock_guard<std::mutex> lock(player_table_mtx);
+    auto it = player_table.find(user_id);
+    if (it == player_table.end())
+        return nullptr;
+    return it->second;
+
 
 }
