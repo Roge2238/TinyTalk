@@ -17,7 +17,8 @@ int timer_fd = -1;
 
 std:: unordered_map<std::string, Session*> online_table;
 std::mutex online_table_mtx;
-
+Account_table account_table;
+std::mutex account_table_mtx;
 
 extern game_manager;
 
@@ -522,8 +523,8 @@ void free_resource(uid user_id, int epfd)
     //删除用户游戏实例
     game_manager.del_player_from_table(user_id);
 
-    
-
+    //清理对应SendFn
+    account_table.delete_send_fn(user_id);
 }
 
 
