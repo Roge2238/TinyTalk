@@ -423,16 +423,22 @@ void type_handler(Session* sn, char type, char* body, int body_len)
 
             Inbox_add(target_user, msg_content);
             notify_user(target_user);
-        }else if (type == 4 )
+        }else if (type == 4 ) 
             {
                 printf("%s 申请进行游戏\n", sn->user_id.c_str());
                 //加入在线玩家表
                 game_manager.add_player_table(sn->user_id); 
 
-            }else if (type == 5 )
+            }else if (type == 5 )//假设这是游戏数据类型消息
             {
-                printf("%s 选择出拳 %s\n", sn->user_id.c_str(), body);
-                game_manager.handle_game_msg(sn, body, body_len);
+                // .....
+                //处理协议 得到 信息data_buf
+                char* data_buf;
+
+                std::shared_ptr<Player> tmp = GameManager.Get_player_from_table(sn -> user_id);
+                //更新数据
+                GameManager.Update_player_GameData(data_buf);
+                
 
             }
 
