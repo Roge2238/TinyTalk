@@ -1,20 +1,34 @@
 
 #include <sys/timerfd.h>
+#include <unordered_map>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <functional>
+#include <atomic>
+#include <optional>
+#include <memory>
+#include <string>
+
+
+#define MAX_BUF 1024
+
 
 struct Packet
 {
     uint8_t type;
     uint32_t body_len;
     char* body;
-}
+};
 
 
-using sendFn = std::function<void(const packet&)>;
+using sendFn = std::function<void(const Packet&)>;
 using uid = std::string;
+using session_id = uint64_t;
 
 struct AccountEntry
 {
-    Id session_id;
+    session_id sid;
     sendFn fn;
 };
 
@@ -33,11 +47,13 @@ class Session : public std::enable_shared_from_this<Session>
 {
     using Ptr = std::shared_ptr<Session>;
     using WeakPtr = std::weak_ptr<Session>;
-    using Id = uint64_t;
+    
 
     public:
         int fd;
-        Id id;
+        uid user_id;
+
+        session_id sid;
         state_t state;
 
         //读缓冲区
@@ -51,8 +67,8 @@ class Session : public std::enable_shared_from_this<Session>
 
         uint64_t deadline_ms;
 
-        explicit Session(int fd, Id user_id) :
-            fd(fd), id(user_id), state(STATE_INIT) {}
+        explicit Session(int fd, session_id sid) :
+            fd(fd), sid(sid), state(STATE_INIT) {}
         
         
         WeakPtr get_weak_ptr(){return weak_from_this();}
@@ -62,7 +78,7 @@ class Session : public std::enable_shared_from_this<Session>
         Session& operator=(const Session&) = delete;
 
 
-}
+};
 
 
 // 内部拥有 user 的 id 和对应 SendFn的映射 哈希表
@@ -70,15 +86,15 @@ class Account_table
 {
     std::unordered_map<uid, AccountEntry> send_slot_map;
 
-    void bind_send_fn(uid, session_id, sendFn fn)
+    void bind_send_fn(uid user_id, session_id sid, sendFn fn)
     {
-        send_slot_map[uid] = {session_id , fn};
+        send_slot_map[user_id] = {sid , fn};
     }
 
 
-    std::optional<sendFn> get_send_fn(uid)
+    std::optional<sendFn> get_send_fn(uid user_id)
     {
-        auto it = send_slot_map.find(uid);
+        auto it = send_slot_map.find(user_id);
         if(it != send_slot_map.end())
         {
             return it->second.fn;
@@ -87,12 +103,18 @@ class Account_table
     }
     // 加入 删除 send_fn 的逻辑
 
-    void delete_send_fn(uid)
+    void delete_send_fn(uid user_id )
     {
-        send_slot_map.erase(uid);
+        send_slot_map.erase(user_id);
     }
 
-}
+};
+
+
+
+
+
+int startup(u_short* port);
 
 
 
@@ -103,19 +125,7 @@ class Account_table
 
 
 
-
-
-
-
-
-
-
-
-
-int startup(&u_short port);
-
-
-
+void  free_resource(uid id, int epfd);
 
 
 
