@@ -32,6 +32,7 @@ typedef struct Player
 {
     std::string id;
     GameData data;
+    sendFn out;
     std::atomic<bool> updated{false};       // 本回合是否已出拳
     std::atomic<bool> queued{false};        // 是否正在匹配队列中
     std::atomic<bool> in_game{false};       // 是否已进入对局
