@@ -13,6 +13,8 @@ void GameManager:: game_thread()
 
 
 
+//这里有个问题很难绷 queue永远是后验逻辑 每次都是取队列元素后通过weak_ptr的lock 看是不是存活
+//处理逻辑有点麻烦 先放这里不动 问ai看看有没有好的数据结构 
 void GameManager:: match_player()
 {
     while(true)
