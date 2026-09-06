@@ -2,6 +2,9 @@
 
 
 
+extern std::atomic<bool> go_running;
+
+extern Account_table account_table;
 
 
 //游戏线程入口 
@@ -17,7 +20,7 @@ void GameManager:: game_thread()
 //处理逻辑有点麻烦 先放这里不动 问ai看看有没有好的数据结构 
 void GameManager:: match_player()
 {
-    while(true)
+    while(go_running.load())
     {
         std::weak_ptr<Player> p1, p2;
         {
@@ -48,7 +51,18 @@ void GameManager:: match_player()
 //加入游戏房间
 void GameManager::come_on_game(std::weak_ptr<Player> p1, std::weak_ptr<Player> p2)
 {
+    while (go_running.load())
+    {
+        //等待玩家的操作数据
+        //以Player的update 为信号
 
+        //if(p1.update() && p2 .update()) 
+
+        game_method(); // 游戏逻辑判断
+
+
+    }
+    
 
 
 
@@ -67,6 +81,19 @@ void wait();
 void GameManager::add_player_table(std::string user_id)
 {
     std::shared_ptr<Player> p;
+    //先从send_slot_map里面找到注册的对应的sendfn 放入player结构体 
+    //这是我自认为很细节的一个点 复制进player后 避免对象频繁访问send_slot_map拿锁找fn  特别是很多对象有通信需求的情况下
+    auto opt_send = account_table.get_send_fn(user_id);
+    if(opt_send.has_value())
+    {
+        //复制进Player实例
+        sendFn tmp = opt_send.value();
+        p->out = tmp;
+    }
+    else
+    {
+        // 没有这个玩家，已经掉线，直接丢弃数据包
+    }
     {
         std::lock_guard<std::mutex>  lock(player_table_mtx);
         auto it = player_table.find(user_id);

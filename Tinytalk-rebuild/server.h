@@ -86,27 +86,28 @@ class Account_table
 {
     std::unordered_map<uid, AccountEntry> send_slot_map;
 
-    void bind_send_fn(uid user_id, session_id sid, sendFn fn)
-    {
-        send_slot_map[user_id] = {sid , fn};
-    }
-
-
-    std::optional<sendFn> get_send_fn(uid user_id)
-    {
-        auto it = send_slot_map.find(user_id);
-        if(it != send_slot_map.end())
+    public:
+        void bind_send_fn(uid user_id, session_id sid, sendFn fn)
         {
-            return it->second.fn;
+            send_slot_map[user_id] = {sid , fn};
         }
-        return std::nullopt;
-    }
-    // 加入 删除 send_fn 的逻辑
 
-    void delete_send_fn(uid user_id )
-    {
-        send_slot_map.erase(user_id);
-    }
+
+        std::optional<sendFn> get_send_fn(uid user_id)
+        {
+            auto it = send_slot_map.find(user_id);
+            if(it != send_slot_map.end())
+            {
+                return it->second.fn;
+            }
+            return std::nullopt;
+        }
+        // 加入 删除 send_fn 的逻辑
+
+        void delete_send_fn(uid user_id )
+        {
+            send_slot_map.erase(user_id);
+        }
 
 };
 
