@@ -75,7 +75,7 @@ void wait();
 
 
 
-
+extern std::mutex account_table_mtx;
 
 
 void GameManager::add_player_table(std::string user_id)
@@ -83,17 +83,22 @@ void GameManager::add_player_table(std::string user_id)
     std::shared_ptr<Player> p;
     //先从send_slot_map里面找到注册的对应的sendfn 放入player结构体 
     //这是我自认为很细节的一个点 复制进player后 避免对象频繁访问send_slot_map拿锁找fn  特别是很多对象有通信需求的情况下
-    auto opt_send = account_table.get_send_fn(user_id);
-    if(opt_send.has_value())
     {
-        //复制进Player实例
-        sendFn tmp = opt_send.value();
-        p->out = tmp;
+        std::lock_guard<std::mutex> lk(account_table_mtx);
+        auto opt_send = account_table.get_send_fn(user_id);
+        
+        if(opt_send.has_value())
+        {
+            //复制进Player实例
+            sendFn tmp = opt_send.value();
+            p->out = tmp;
+        }
+        else
+        {
+            // 没有这个玩家，已经掉线，直接丢弃数据包
+        }
     }
-    else
-    {
-        // 没有这个玩家，已经掉线，直接丢弃数据包
-    }
+    
     {
         std::lock_guard<std::mutex>  lock(player_table_mtx);
         auto it = player_table.find(user_id);
