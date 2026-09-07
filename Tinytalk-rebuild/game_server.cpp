@@ -60,7 +60,9 @@ void GameManager::come_on_game(std::weak_ptr<Player> p1, std::weak_ptr<Player> p
 
         game_method(); // 游戏逻辑判断
 
-
+        //发送游戏数据 
+        Packet pkt;
+        p1->out(pkt);
     }
     
 
@@ -75,30 +77,25 @@ void wait();
 
 
 
-extern std::mutex account_table_mtx;
+// (account_table_mtx 已随注册表内部化移除:注册表自带锁,见 server.h)
 
 
 void GameManager::add_player_table(std::string user_id)
 {
     std::shared_ptr<Player> p;
-    //先从send_slot_map里面找到注册的对应的sendfn 放入player结构体 
-    //这是我自认为很细节的一个点 复制进player后 避免对象频繁访问send_slot_map拿锁找fn  特别是很多对象有通信需求的情况下
+    // 先从注册表拷出该用户的发送权柄,复制进 Player —— 之后每次发消息不用再抢注册表的锁。
+    // 注册表内部自带锁,调用方不要再额外加锁;曾经的外部锁 account_table_mtx 已移除。
+    // TODO(R4 游戏模块):注意顺序 bug —— 此刻 p 还是空 shared_ptr,下面的 p->out 会
+    // 解引用空指针;应把"取 fn"挪到 p 创建之后,重写 add_player_table 时一起修。
+    if (auto opt_send = account_table.get_send_fn(user_id))
     {
-        std::lock_guard<std::mutex> lk(account_table_mtx);
-        auto opt_send = account_table.get_send_fn(user_id);
-        
-        if(opt_send.has_value())
-        {
-            //复制进Player实例
-            sendFn tmp = opt_send.value();
-            p->out = tmp;
-        }
-        else
-        {
-            // 没有这个玩家，已经掉线，直接丢弃数据包
-        }
+        p->out = *opt_send;
     }
-    
+    else
+    {
+        // 注册表里查不到该用户(已下线/未登录):丢弃本次游戏申请
+    }
+
     {
         std::lock_guard<std::mutex>  lock(player_table_mtx);
         auto it = player_table.find(user_id);
