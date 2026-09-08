@@ -47,7 +47,7 @@ using sendFn = std::function<void(const Packet&)>;
 using uid = std::string;
 using session_id = uint64_t;   // 连接唯一 id,accept 时从自增计数器分配,之后不再变
 
-// 注册表里的一项:一个在线用户对应"他当前这条连接"的发送权柄
+
 struct AccountEntry
 {
     session_id sid;
@@ -79,7 +79,7 @@ public:
     session_id sid;               // accept 时分配,全局唯一
     state_t state;
 
-    // 读缓冲区:io 线程专用(拆帧时可能越界扫描,所以必须清零,见构造函数)
+    // 读缓冲区
     char read_buf[MAX_BUF];
     int read_pos;
     // 写缓冲区:append_pkg / write_msg 可能被模块线程调用,用 write_mtx 保护
@@ -94,8 +94,7 @@ public:
     explicit Session(int fd, session_id sid)
         : fd(fd), sid(sid), state(STATE_LOGIN), read_pos(0), write_pos(0), deadline_ms(0)
     {
-        // 血泪教训:缓冲必须清零。解析代码会在读缓冲里做无界扫描,
-        // 未初始化的内存会让同样的输入产生不可复现的行为。
+        
         memset(read_buf, 0, sizeof(read_buf));
         memset(write_buf, 0, sizeof(write_buf));
     }
@@ -113,8 +112,7 @@ public:
 class Account_table
 {
 public:
-    // 注册(登录成功时调用;同 uid 重复登录会覆盖旧条目 —— 旧连接的回收带
-    // sid 校验,不会误删新条目)
+    // 注册(登录成功时调用;同 uid 重复登录会覆盖旧条目 
     void bind(const uid& user_id, session_id sid, const sendFn& fn)
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -147,7 +145,7 @@ public:
         return std::nullopt;
     }
 
-    // 在线列表:注册表的键集合就是"当前已登录用户"
+    // 在线列表查询
     std::vector<uid> list_uids()
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -163,8 +161,6 @@ private:
 };
 
 // ---- 网络层内部接口(实现都在 server.cpp)----
-// 声明放在这里是为了解决"先调用、后定义"的编译顺序问题;
-// 将来网络层拆成独立文件(net/)时,这些声明会原样搬走。
 void error_die(const char* msg);
 int startup(u_short* port);          // 建监听套接字
 void connect_thread(int listen_fd);  // io 线程主循环(唯一 epoll_wait 的地方)
