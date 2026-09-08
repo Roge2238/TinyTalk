@@ -25,15 +25,13 @@
 int epfd = -1;
 int timer_fd = -1;
 
-// 连接表:网络层所有连接的登记处(含未登录连接)
-// Session 的【唯一长期拥有者】是 conn_table 里的 shared_ptr;epoll 事件与各处函数里的
-// Session* 都只是非拥有的裸指针,只能在 io 线程内、Session 存活期间使用。
-//只允许 io 线程访问(accept / 回收都发生在这条线程上),因此不需要加锁。
+// 连接表:网络层所有连接的登记处
+
 //sid -> Session
 std::unordered_map<session_id, std::shared_ptr<Session>> conn_table;
 std::atomic<session_id> next_sid{1};
 
-// 账号注册表(uid -> 发送权柄SenFn)内部自带锁,见 server.h。
+// 账号注册表 uid -> 发送权柄SenFn
 Account_table account_table;
 
 
@@ -369,7 +367,7 @@ int startup(u_short* port)
 
 
 
-// 消息分发:按 连接状态 + 消息类型 找对应的处理逻辑。
+
 // 现阶段还是 if/else;将来模块多了以后会改成"模块注册 type -> 处理器"的注册表
 // (见 DESIGN.md 8.2),加新功能时不需要再改这个函数。
 void type_handler(Session* sn, char type, char* body, int body_len,
@@ -387,9 +385,7 @@ void type_handler(Session* sn, char type, char* body, int body_len,
             strncpy(user, body, USER_ID_LEN - 1);
             user[USER_ID_LEN - 1] = '\0';
 
-            // 单点登录:同一 uid 若已有旧连接(例如上次断开没走干净),把旧 sid 记进
-            // closing,等本批事件结束由 teardown_session 统一回收 —— 不在事件循环中间
-            // 直接销毁,防止同批事件里还残留指向旧 Session 的裸指针。
+            //防止同批事件里还残留指向旧 Session 的裸指针。
             if (auto old_sid = account_table.get_sid(user))
             {
                 if (*old_sid != sn->sid)
@@ -403,8 +399,7 @@ void type_handler(Session* sn, char type, char* body, int body_len,
             sn->user_id = user;
             sn->state = STATE_NORMAL;
 
-            // 绑定发送权柄:登录后,其他模块查注册表就能给这个用户发消息。
-            // 本连接 accept 时就登记进 conn_table 了,这里一定能找到。
+           
             auto it = conn_table.find(sn->sid);
             if (it == conn_table.end())
             {
@@ -412,6 +407,7 @@ void type_handler(Session* sn, char type, char* body, int body_len,
                 printf("!! 登录时连接表里找不到本连接 sid=%llu\n", (unsigned long long)sn->sid);
                 return;
             }
+            //user 与 sendfn绑定 
             account_table.bind(user, sn->sid, make_send_fn(it->second));
             printf("用户 %s 已上线\n", user);
 
@@ -527,7 +523,7 @@ void teardown_session(session_id sid)
 {
     auto it = conn_table.find(sid);
     if (it == conn_table.end())
-        return;   // 已回收过(同批事件里可能被记了多次)
+        return;   // 已回收过 同批事件里可能被记了多次
 
     auto sn = it->second;
 
@@ -549,9 +545,8 @@ void teardown_session(session_id sid)
 }
 
 
-// uid 版回收入口:给"只认识 uid、不认识 sid"的调用方用(目前是超时模块)。
-// 先查注册表拿到 sid,再走统一的 teardown_session。
-// 注意 teardown 只允许在 io 线程执行 —— 超时模块挂在 io 线程的 timer 事件上,满足条件。
+
+// 先查注册表拿到 sid,再走统一的 teardown_session
 void free_resource(uid user_id, int epfd)
 {
     (void)epfd;   // 暂未使用;超时模块重写(改扫连接表)时会连同签名一起清理
