@@ -1,3 +1,4 @@
+#pragma once
 // 目前只有一个游戏 先这么写
 
 
@@ -11,7 +12,7 @@
 #include <unordered_map>
 
 
-typedef struct GameFrame
+struct GameFrame
 {
 
 };
@@ -28,7 +29,7 @@ struct GameData
 
 
 
-typedef struct Player
+struct Player
 {
     std::string id;
     GameData data;
@@ -53,10 +54,11 @@ class GameManager
     void add_player_table(std::string user_id);
     void del_player_from_table(std::string user_id);
     std::shared_ptr<Player> Get_player_from_table(std::string user_id);
-    void game_thread();
+    void game_loop();
     void come_on_game(std::weak_ptr<Player> p1, std::weak_ptr<Player> p2);
     void Update_player_GameData(char* data);
-
+    void on_user_offline(const std::string& uid);   // 下线回调:擦表;对局中只置 disconnected
+    void game_method();
     private:
     
         // 匹配队列 从主线程来的都先进入这个
@@ -75,9 +77,9 @@ class GameManager
 
 
 
+void game_thread();
 
-
-
+void On_user_offline(const std::string& uid);
 
 
 
