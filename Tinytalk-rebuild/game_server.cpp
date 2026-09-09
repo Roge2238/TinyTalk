@@ -2,13 +2,16 @@
 
 
 
-extern std::atomic<bool> go_running;
+//global variable
+GameManager game_manager;
 
+//extern
+extern std::atomic<bool> go_running;
 extern Account_table account_table;
 
 
 //游戏线程入口 
-void GameManager:: game_thread()
+void GameManager:: game_loop()
 {
     match_player();
 }
@@ -73,7 +76,10 @@ void GameManager::come_on_game(std::weak_ptr<Player> p1, std::weak_ptr<Player> p
 
 
 
-void wait();
+void GameManager:: game_loop()
+{
+
+}
 
 
 
@@ -84,7 +90,7 @@ void GameManager::add_player_table(std::string user_id)
 {
     std::shared_ptr<Player> p;
     // 先从注册表拷出该用户的发送权柄,复制进 Player —— 之后每次发消息不用再抢注册表的锁。
-    // 注册表内部自带锁,调用方不要再额外加锁;曾经的外部锁 account_table_mtx 已移除。
+   
     // TODO(R4 游戏模块):注意顺序 bug —— 此刻 p 还是空 shared_ptr,下面的 p->out 会
     // 解引用空指针;应把"取 fn"挪到 p 创建之后,重写 add_player_table 时一起修。
     if (auto opt_send = account_table.get_send_fn(user_id))
@@ -175,4 +181,21 @@ void GameManager:: Update_player_GameData(char* data_buf)
 
 
 
+}
+
+
+//tearsession后回调 ： 设Player中的 disconnected状态为 0 
+ void GameManager:: on_user_offline(const std::string& uid)
+ {
+    {
+        std::lock_guard<std::mutex> lk(player_table_mtx);
+        auto it = player_table.find(uid);
+        if(it == player_table.end()) return;
+        it -> second -> disconnected.store(true);
+    }
+ }
+
+void game_thread()
+{
+    game_manager.game_loop();
 }
