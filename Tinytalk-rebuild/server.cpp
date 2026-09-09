@@ -1,6 +1,6 @@
 #include "server.h"
 #include "timeout_handle.h"
-
+#include "game_server.h"
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -17,8 +17,9 @@
 #define MAX_EPOLL_EVENT 10 // 待改
 #define HEAD_LEN 5
 
-//断连检测 10s 
-#define CLIENT_TIME_OUT_MS 10000
+// 未登录连接登录时限:10s 内未完成登录即回收(防半连接堆积)
+// 注意:客户端心跳上线前,已登录用户不做空闲踢(见 DESIGN.md §7)
+#define LOGIN_TIME_OUT_MS 10000
 
 //global 
 
@@ -39,6 +40,11 @@ Account_table account_table;
 
 
 
+// epoll_event.data 是 union ！！！
+//使用哨兵地址变量
+static int s_tag_listen; // listen_fd
+static int s_tag_timer;  // timer_fd
+
 void connect_thread(int listen_fd)
 {
     epfd = epoll_create1(0);
@@ -48,15 +54,22 @@ void connect_thread(int listen_fd)
     timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (timer_fd < 0) error_die("timerfd_create");
 
-    // 监听套接字 / 定时器用 data.fd 区分;业务连接用 data.ptr 指向 Session
     struct epoll_event ev;
     ev.events = EPOLLIN | EPOLLET;
-    ev.data.fd = listen_fd;
+    ev.data.ptr = &s_tag_listen;
     epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
 
+    // 定时器:周期 1s 的闹钟 —— 超时模块按 tick 扫描 conn_table
     ev.events = EPOLLIN;
-    ev.data.fd = timer_fd;
+    ev.data.ptr = &s_tag_timer;
     epoll_ctl(epfd, EPOLL_CTL_ADD, timer_fd, &ev);
+
+    struct itimerspec its;
+    its.it_interval.tv_sec = 1;
+    its.it_interval.tv_nsec = 0;
+    its.it_value = its.it_interval;   // 立即开始,之后每秒一响
+    if (timerfd_settime(timer_fd, 0, &its, nullptr) < 0)
+        error_die("timerfd_settime");
 
     struct epoll_event events[MAX_EPOLL_EVENT];
 
@@ -79,18 +92,17 @@ void connect_thread(int listen_fd)
             void* ptr = events[i].data.ptr;
             uint32_t pre_event = events[i].events;
 
-            if (ptr == nullptr)   // 监听套接字 / 定时器
+            if (ptr == &s_tag_timer)   // 定时器:超时扫描
             {
-                int fd = events[i].data.fd;
-                if (fd == timer_fd)
-                {
-                    handle_timeout();   // 超时扫描
-                    continue;
-                }
-                if (fd != listen_fd || !(pre_event & EPOLLIN))
-                    continue;
+                std::vector<session_id> expired = handle_timeout();
+                closing.insert(closing.end(), expired.begin(), expired.end());
+                continue;
+            }
+            if (ptr == &s_tag_listen)   // 监听套接字
+            {
+                if (!(pre_event & EPOLLIN)) continue;
 
-                while (1)   // ET 模式:一次把排队的连接全部 accept 完
+                while (1)   // ET
                 {
                     struct sockaddr_in client_addr;
                     socklen_t addr_len = sizeof(client_addr);
@@ -110,6 +122,8 @@ void connect_thread(int listen_fd)
                     // Session 从这一刻起由 conn_table 的 shared_ptr 拥有 —— sendFn 里的
                     // weak 也是从这里拷贝的;没有 shared 拥有者的 Session,weak 永远是空。
                     auto sn = std::make_shared<Session>(client_fd, next_sid.fetch_add(1));
+                    // 未登录连接给一个"登录时限":超时模块据此回收半连接
+                    sn->deadline_ms = get_now_ms() + LOGIN_TIME_OUT_MS;
                     conn_table.emplace(sn->sid, sn);
                     epoll_add(epfd, client_fd, EPOLLIN | EPOLLET, sn.get());
                     printf("新连接: sid=%llu\n", (unsigned long long)sn->sid);
@@ -118,10 +132,8 @@ void connect_thread(int listen_fd)
             }
 
             // ---- 业务连接事件 ----
-            Session* sn = (Session*)ptr;   // 裸指针只在 io 线程内、Session 存活期间使用
+            Session* sn = (Session*)ptr;   
             bool need_close = false;
-
-            // TODO(R2 超时模块):在这里刷新 sn->deadline_ms(最后活跃时间)
 
             if (pre_event & EPOLLIN)
             {
@@ -131,7 +143,11 @@ void connect_thread(int listen_fd)
                 }
                 else
                 {
-                    handler(sn, closing);   // 拆帧分发;登录踢旧连接时也往 closing 里记
+                    // 收到任何数据都刷新登录时限(未登录连接)
+                    if (sn->state == STATE_LOGIN)
+                        sn->deadline_ms = get_now_ms() + LOGIN_TIME_OUT_MS;
+
+                    handler(sn, closing);  
                 }
             }
             if (!need_close && (pre_event & EPOLLOUT))
@@ -145,19 +161,13 @@ void connect_thread(int listen_fd)
             }
         }
 
-        // 批处理结束,统一回收本批要关闭的连接
+        //统一回收本批要关闭的连接
         for (session_id sid : closing)
             teardown_session(sid);
     }
 }
 
 
-// ============================================================
-// 发送权柄(sendFn)工厂:给一个连接生成"只许发送"的凭证,交给上层模块使用。
-// 血泪教训:weak 必须从 conn_table 里的 shared_ptr 拷贝 —— 曾经的写法是拿裸 new 的
-// Session 调 weak_from_this(),得到的 weak 永远是空的,所有外发消息被静默丢弃。
-// 连接 teardown 后:lock() 失败(没人再持有引用)或 closed 置位,发送自动变空操作,
-// 从根上杜绝悬垂指针。
 // ============================================================
 static sendFn make_send_fn(const std::shared_ptr<Session>& s)
 {
@@ -176,32 +186,32 @@ static sendFn make_send_fn(const std::shared_ptr<Session>& s)
 
 int read_msg(Session* sn)
 {
-    //从内核缓冲区读取消息到用户态读缓冲区
-    char* buf = sn-> read_buf + sn->read_pos;
+    // 从内核缓冲区读取消息到用户态读缓冲区(ET 模式:读到 EAGAIN 为止)
+    char* buf = sn->read_buf + sn->read_pos;
     int left = MAX_BUF - sn->read_pos;
 
-    while(1)
+    while (1)
     {
-        int n = recv(sn -> fd, buf, left, 0);
-        if(n >0)
+        int n = recv(sn->fd, buf, left, 0);
+        if (n > 0)
         {
             sn->read_pos += n;
-            buf +=n;
-            left-=n;
-            if(left <= 0) break;
+            buf += n;
+            left -= n;
+            if (left <= 0) break;   // 读缓冲已满,剩余数据等下次 EPOLLIN
         }
-        else if(n == 0)
+        else if (n == 0)
         {
-            return -1;  
+            return -1;              // 对端关闭
         }
         else
         {
-            if(errno == EAGAIN || errno == EWOULDBLOCK)
-                break;
-            return -1;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                break;              // 本次可读数据已读完
+            return -1;              // 真错误
+        }
     }
     return 0;
-    }
 }
 
 
@@ -256,8 +266,7 @@ int write_msg(Session* sn)
 void append_pkg(Session* sn, char type, const char* msg, int len)
 {
     std::lock_guard<std::mutex> lk(sn->write_mtx);
-    // 连接已进入回收流程(closed 置位):调用方持有的可能是回收前拷出的 shared_ptr,
-    // 对象还活着但 fd 即将/已经被关闭 —— 不允许再碰它(也防止 fd 复用后发错对象)。
+   
     if (sn->closed.load())
         return;
     if (len < 0 || msg == nullptr)
@@ -279,8 +288,6 @@ void append_pkg(Session* sn, char type, const char* msg, int len)
     if(epoll_mod(epfd, sn->fd, EPOLLIN | EPOLLOUT | EPOLLET, sn) < 0)
         perror("[append_pkg] epoll_mod failed");
 }
-
-
 
 
 
@@ -531,11 +538,12 @@ void teardown_session(session_id sid)
     sn->closed.store(true);               // 2
     conn_table.erase(it);                 // 3 (sn 由本函数局部引用继续持有,安全)
 
-    if (!sn->user_id.empty())
+    if (!sn->user_id.empty())// 用户已登录
     {
         account_table.unbind(sn->user_id, sid);   // 4
-        // TODO(R4 游戏模块):游戏模块的下线清理(删玩家表/结束对局)应通过模块回调
-        // 接到这里,而不是让网络层直接调用游戏模块(依赖方向见 DESIGN.md R3)。
+
+        // 4.5 通知各模块"用户下线":现阶段直接调游戏模块的回调
+        On_user_offline(sn->user_id);
     }
     close(sn->fd);                        // 5
 
@@ -550,6 +558,7 @@ void teardown_session(session_id sid)
 void free_resource(uid user_id, int epfd)
 {
     (void)epfd;   // 暂未使用;超时模块重写(改扫连接表)时会连同签名一起清理
+    // 下线通知已收口在 teardown_session(所有下线路径的唯一出口),这里不重复调用
     if (auto s = account_table.get_sid(user_id))
         teardown_session(*s);
 }
