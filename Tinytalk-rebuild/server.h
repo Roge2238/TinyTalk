@@ -155,6 +155,17 @@ public:
         return out;
     }
 
+
+    void for_each_del_session(std::function<void(std::string, int)> cb) //free_resource
+    {
+        for(auto &it : slot_map_)
+        {
+            auto &pair = it.second;
+            Session* tmp = pair.fn;
+            if(tmp->fd == -1) continue;
+
+        }
+    }
 private:
     mutable std::mutex mtx_;
     std::unordered_map<uid, AccountEntry> slot_map_;

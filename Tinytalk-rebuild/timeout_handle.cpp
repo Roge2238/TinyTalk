@@ -1,7 +1,14 @@
 #include "timeout_handle.h"
 
+
 #include <cstdio>
 #include <chrono>
+#include <vector>
+#include <unordered_map>
+
+
+
+using session_id = uint64_t;
 
 // ============================================================
 // 超时模块实现。
